@@ -4,7 +4,7 @@ English | [中文](README.md)
 
 > Idempotency / duplicate-execution guard for DeepSeek Harness: when an agent retries a side-effecting tool call after a timeout or error, deduplicate by idempotency key and reuse the previous result instead of executing again.
 
-> **Status: planned (2026-08-16), work in progress (WIP).** This README finalizes the positioning and design. The first two plugins in the suite — `dsh-chaos` (fault injection) and `dsh-tool-transaction` (Saga compensation) — are already released (npm 0.1.0); this is the third.
+> **Status: MVP implemented (2026-08-17).** Core guard (`tools/execute` interception: cached-result reuse / in-flight joining / same-key-different-args fail-loud) plus 16 unit tests passing (vitest 4.1, oxlint 0 warnings, tsc 0 errors); E2E combination tests and npm release are next. The first two plugins in the suite — `dsh-chaos` (fault injection) and `dsh-tool-transaction` (Saga compensation) — are already released (npm 0.1.0); this is the third.
 
 ## Problem
 
@@ -78,7 +78,8 @@ await ctx.idempotency.run('create_order', { orderId }, async () => createOrder()
 
 ## Known Limitations and Deferred Work
 
-- **Not yet implemented**: this repository finalizes the positioning; code, tests, and release have not started.
+- **Not yet released**: npm 0.1.0 not published (code and unit tests are ready; E2E and release come next).
+- **Deferred to v1.1**: the `ctx.idempotency` service API and the post-execute model-visible reuse notice (require dsh-llm / dsh-session dependencies).
 - No distributed locks / 2PC / cross-process exactly-once: multi-instance scenarios should compose the official `dsh-session-checkpoint-policy` or transaction compensation.
 - No process-crash recovery: side-effect inspection and recovery after a crash belong to `dsh-tool-transaction` / checkpoint territory (already implemented officially; that direction was dropped).
 - Result reuse is only offered for deterministic, safely replayable tools; non-deterministic tools are deduplicated without caching.

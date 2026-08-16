@@ -4,7 +4,7 @@
 
 > DeepSeek Harness 的幂等 / 重复执行守卫插件：Agent 因超时/重试重复调用副作用工具时，按幂等键（idempotency key）去重并复用历史结果，防止重复副作用。
 
-> **状态：已立项（2026-08-16），实现中（WIP）。** 本 README 为定位与设计定稿。系列前两款 `dsh-chaos`（故障注入）与 `dsh-tool-transaction`（Saga 补偿）已发布（npm 0.1.0），本插件为第三款。
+> **状态：MVP 已实现（2026-08-17）。** 核心守卫（`tools/execute` 拦截：缓存复用 / 并发加入 / 同 key 不同参数 fail-loud）+ 16 项单元测试通过（vitest 4.1，oxlint 0 告警，tsc 0 错误）；E2E 组合测试与 npm 发布待后续。系列前两款 `dsh-chaos`（故障注入）与 `dsh-tool-transaction`（Saga 补偿）已发布（npm 0.1.0），本插件为第三款。
 
 ## 解决什么问题
 
@@ -78,7 +78,8 @@ await ctx.idempotency.run('create_order', { orderId }, async () => createOrder()
 
 ## Known Limitations and Deferred Work
 
-- **尚未实现**：本仓库为立项定稿，代码、测试、发布均未开始
+- **尚未发布**：npm 0.1.0 未发布（代码与单元测试就绪，E2E 与发布待后续）
+- **v1.1 推迟项**：`ctx.idempotency` 服务 API 与 post-execute 模型可见复用提示（需要 dsh-llm / dsh-session 依赖）
 - 不做分布式锁 / 2PC / 跨进程 exactly-once：多实例场景需组合官方 `dsh-session-checkpoint-policy` 或事务补偿
 - 不做进程崩溃恢复：崩溃后的副作用盘点与恢复属于 `dsh-tool-transaction` / checkpoint 领域（官方已实现，该方向已放弃立项）
 - 结果复用只对「确定性、可安全重放」的工具开放；不确定工具只去重不缓存

@@ -1,0 +1,7 @@
+# dsh-tool-idempotency bundle patch: inserts the idempotency guard row into
+# the profile tree. The guard is provided by this plugin; opted-in tools get
+# deduplicated by idempotency key (cached-result reuse or in-flight join), so
+# agent retries after timeouts do not repeat side effects.
+- insert:
+    - id: tool-idempotency
+      name: '@why-daydream/dsh-tool-idempotency'
