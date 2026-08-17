@@ -1,0 +1,30 @@
+name: npm-publish
+
+# 发布 @why-daydream/dsh-tool-idempotency 到 npm。
+# lib/ 是已提交的构建产物（.gitignore 已移除），runner 无需安装依赖或构建；
+# devDependencies 中的 link: 本地路径仅供开发使用，`npm publish` 不触碰它们。
+on:
+  workflow_dispatch: # 手动触发：当前 v0.1.0 的 tag 已存在，需在 Actions 页点击 Run workflow
+  push:
+    tags: ['v*'] # 未来版本：推送 v* tag 时自动发布
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: 校验发布物
+        run: npm pack --dry-run
+
+      - name: 发布到 npm
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
