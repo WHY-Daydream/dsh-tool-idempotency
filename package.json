@@ -1,7 +1,7 @@
 {
   "name": "@why-daydream/dsh-tool-idempotency",
   "description": "Deduplicate retried tool calls by idempotency key, reuse prior results, and prevent duplicate side effects for DeepSeek Harness agents",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publishConfig": {
     "access": "public"
   },
