@@ -8,7 +8,7 @@
 |---|---|---|
 | `dsh-chaos` | 故障注入 | ✅ 已发布 npm 0.1.0 + GitHub Release v0.1.0（2026-08-16 封板） |
 | `dsh-tool-transaction` | Saga 补偿 | ✅ 已发布 npm 0.1.0 + GitHub Release v0.1.0（2026-08-16 封板） |
-| `dsh-tool-idempotency` | 幂等 / 重复副作用防御 | 🚧 MVP 已实现（未发布） |
+| `dsh-tool-idempotency` | 幂等 / 重复副作用防御 | ✅ 已发布 npm 0.1.0 + GitHub Release v0.1.0（2026-08-17） |
 
 完整链路：**Fault Injection → Duplicate Prevention → Compensation**。
 
@@ -27,14 +27,13 @@
 | 9 | E2E 设计（场景 A：chaos timeout→retry→幂等复用；场景 B：transaction 补偿兜底） | ARCHITECTURE.md「E2E 设计」 |
 | 10 | 提交并推送 main（`42dbd84`，无 Co-Authored-By） | GitHub 远程已验证 |
 | 11 | **E2E 实现（2/2 通过）** | tests/e2e.spec.ts：场景 A 用 chaos seed=9 使首调 TOOL_TIMEOUT、重试复用（副作用恰 1 次）；场景 B 复合 Saga 工具经 `ctx.tools.execute` 嵌套调度，chaos HTTP_500 触发逆序补偿 → `ROLLED_BACK` |
-| 12 | **发布链：tag v0.1.0 + GitHub Release v0.1.0** | tag 已推（`f8a0389`）；Release id 371672495 已公开（2026-08-17 API 复验 200）；npm 0.1.0 **未上架**（用户 2026-08-17 确认） |
+| 12 | **发布链：tag v0.1.0 + GitHub Release v0.1.0 + npm 0.1.0** | tag 已推（`f8a0389`）；Release id 371672495 已公开（API 复验 200）；npm 0.1.0 已上架（2026-08-17，GitHub Actions run 32024603331 成功，npmmirror 复验 `latest: 0.1.0`）——套件三款插件全部闭环 |
 
 ## 三、未完成（按优先级）
 
 | # | 事项 | 说明 |
 |---|---|---|
-| 1 | **npm 0.1.0 发布** | 用户确认未上架；本环境到 `registry.npmjs.org` 网络不可达（直连超时、代理端口全灭），无法代发——需用户联网机器执行 `npm publish --access public` |
-| 2 | **v1.1 推迟项** | `ctx.idempotency` 服务 API；post-execute 模型可见复用提示（需 dsh-llm / dsh-session 依赖） |
+| 1 | **v1.1 推迟项** | `ctx.idempotency` 服务 API；post-execute 模型可见复用提示（需 dsh-llm / dsh-session 依赖） |
 | 3 | **仓库 polish** | 三个仓库补 description + 打 `dsh-plugin` topic（`gh repo edit`，需用户 GitHub 认证执行） |
 | 4 | **Show Your Plugins! 投稿** | 文案已备（中英双语），待用户发布到官方讨论区 |
 
