@@ -27,12 +27,13 @@
 | 9 | E2E 设计（场景 A：chaos timeout→retry→幂等复用；场景 B：transaction 补偿兜底） | ARCHITECTURE.md「E2E 设计」 |
 | 10 | 提交并推送 main（`42dbd84`，无 Co-Authored-By） | GitHub 远程已验证 |
 | 11 | **E2E 实现（2/2 通过）** | tests/e2e.spec.ts：场景 A 用 chaos seed=9 使首调 TOOL_TIMEOUT、重试复用（副作用恰 1 次）；场景 B 复合 Saga 工具经 `ctx.tools.execute` 嵌套调度，chaos HTTP_500 触发逆序补偿 → `ROLLED_BACK` |
+| 12 | **发布链：tag v0.1.0 + GitHub Release v0.1.0** | tag 已推（`f8a0389`）；Release id 371672495 已公开（2026-08-17 API 复验 200）；npm 上架复验中（npmmirror/unpkg/jsdelivr 暂 404，疑同步延迟） |
 
 ## 三、未完成（按优先级）
 
 | # | 事项 | 说明 |
 |---|---|---|
-| 1 | **发布链**（下一阶段） | npm 0.1.0 → tag v0.1.0 → GitHub Release |
+| 1 | **npm 0.1.0 上架确认** | 用户已在联网机器执行发布；本环境各镜像复验暂 404（同步延迟或发布未成功），需用户回执 `npm publish` 输出确认 |
 | 2 | **v1.1 推迟项** | `ctx.idempotency` 服务 API；post-execute 模型可见复用提示（需 dsh-llm / dsh-session 依赖） |
 | 3 | **仓库 polish** | 三个仓库补 description + 打 `dsh-plugin` topic（`gh repo edit`，需用户 GitHub 认证执行） |
 | 4 | **Show Your Plugins! 投稿** | 文案已备（中英双语），待用户发布到官方讨论区 |
