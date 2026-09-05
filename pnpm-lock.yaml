@@ -15,24 +15,51 @@ importers:
       '@deepseek-ai/cordis':
         specifier: link:../deepseek-harness/vendor/cordis
         version: link:../deepseek-harness/vendor/cordis
+      '@deepseek-ai/dsh-agent':
+        specifier: link:../deepseek-harness/packages/core/agent
+        version: link:../deepseek-harness/packages/core/agent
+      '@deepseek-ai/dsh-agent-loop':
+        specifier: link:../deepseek-harness/packages/core/agent-loop
+        version: link:../deepseek-harness/packages/core/agent-loop
+      '@deepseek-ai/dsh-agent-loop-testkit':
+        specifier: link:../deepseek-harness/packages/test-support/agent-loop-testkit
+        version: link:../deepseek-harness/packages/test-support/agent-loop-testkit
       '@deepseek-ai/dsh-invariants':
         specifier: link:../deepseek-harness/packages/runtime-diagnostics/invariants
         version: link:../deepseek-harness/packages/runtime-diagnostics/invariants
       '@deepseek-ai/dsh-llm':
         specifier: link:../deepseek-harness/packages/llm/llm
         version: link:../deepseek-harness/packages/llm/llm
+      '@deepseek-ai/dsh-session':
+        specifier: link:../deepseek-harness/packages/core/session
+        version: link:../deepseek-harness/packages/core/session
       '@deepseek-ai/dsh-system-prompt':
         specifier: link:../deepseek-harness/packages/core/system-prompt
         version: link:../deepseek-harness/packages/core/system-prompt
+      '@deepseek-ai/dsh-tool-call-timeout-policy':
+        specifier: link:../deepseek-harness/packages/guard/timeout-policy
+        version: link:../deepseek-harness/packages/guard/timeout-policy
       '@deepseek-ai/dsh-tools':
         specifier: link:../deepseek-harness/packages/core/tools
         version: link:../deepseek-harness/packages/core/tools
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.1
+      '@types/semver':
+        specifier: ^7.8.0
+        version: 7.8.0
+      '@why-daydream/dsh-chaos':
+        specifier: link:../dsh-chaos
+        version: link:../dsh-chaos
+      '@why-daydream/dsh-tool-transaction':
+        specifier: link:../dsh-tool-transaction
+        version: link:../dsh-tool-transaction
       oxlint:
         specifier: ^0.16.0
         version: 0.16.12
+      semver:
+        specifier: ^7.8.4
+        version: 7.8.5
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -205,6 +232,9 @@ packages:
 
   '@types/node@22.20.1':
     resolution: {integrity: sha512-EANqOCF9QFyra+4pfxUcX9STKJpCLjMbObVzljIJomAWSnuSIEAvyzEU53GaajbXJEgdh0iEcPL+DGvpUd4k1Q==}
+
+  '@types/semver@7.8.0':
+    resolution: {integrity: sha512-1mAINjtQCXXeLkJ9ehXkwOcBpqtLxiVtKhpUf83DdRNdQKV0iXZpaHYqRr7nj+wvxuJzoAmAwXI+sCNMv1CzLQ==}
 
   '@vitest/expect@4.1.10':
     resolution: {integrity: sha512-YsCn+qAk1GWjQOWFEsEcL2gNQ0zmVmQu3T03qP6UyjhtmdtwtbuI+DASn/7iQB3HGTXkdBwGddzxPlmiql5vlA==}
@@ -382,6 +412,11 @@ packages:
   rolldown@1.2.4:
     resolution: {integrity: sha512-rSr7irW0K7QRWzjdJXqZowkcRdDtjRduh43rBltnVKd0VFq839l1lJoDvGJb6gl7+4rTTCrPWu+YfujUL8Ug7w==}
     engines: {node: ^20.19.0 || >=22.12.0}
+    hasBin: true
+
+  semver@7.8.5:
+    resolution: {integrity: sha512-Y7/KDsb8LjooZpwaqGyulO6DQlksgCncchHGk+sZIY4SBvUocMBEFH5Ur1fI4dV+Jvl0w6cjvucaIi40puRioA==}
+    engines: {node: '>=10'}
     hasBin: true
 
   siginfo@2.0.0:
@@ -605,6 +640,8 @@ snapshots:
     dependencies:
       undici-types: 6.21.0
 
+  '@types/semver@7.8.0': {}
+
   '@vitest/expect@4.1.10':
     dependencies:
       '@standard-schema/spec': 1.1.0
@@ -768,6 +805,8 @@ snapshots:
       '@rolldown/binding-openharmony-arm64': 1.2.4
       '@rolldown/binding-win32-arm64-msvc': 1.2.4
       '@rolldown/binding-win32-x64-msvc': 1.2.4
+
+  semver@7.8.5: {}
 
   siginfo@2.0.0: {}
 

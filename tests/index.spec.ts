@@ -8,9 +8,9 @@
 
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { CallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
+import { type ContentBlock } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime, { defineContentToolFixture, type JsonValue } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import * as Idempotency from '../src/index.js'
 import type { Config } from '../src/index.js'
 
@@ -20,6 +20,18 @@ let callSequence = 0
 function nextCallId(): string {
   callSequence += 1
   return `c${callSequence}`
+}
+
+/**
+ * dsh-llm renamed its call-id brand `CallId` → `ToolCallId` between the
+ * 0.1.0-rc.5 baseline link and 0.1.2-rc.1+ (PCA F2b'); resolve whichever the
+ * linked package exports so this suite runs against both eras (test-only).
+ */
+async function brandCallId(id: string): Promise<never> {
+  const llm = (await import('@deepseek-ai/dsh-llm')) as Record<string, unknown>
+  const make = (llm.ToolCallId ?? llm.CallId) as ((s: string) => unknown) | undefined
+  if (typeof make !== 'function') throw new Error('dsh-llm exports neither ToolCallId nor CallId')
+  return make(id) as never
 }
 
 /** Boot the system-prompt + tool registry + the idempotency plugin. */
@@ -44,11 +56,14 @@ function registerTool(ctx: Context, name: string, body: () => ContentBlock[] | P
 }
 
 /** Dispatch one tool call through the real pipeline. */
-function executeTool(ctx: Context, name: string, argumentsValue: Record<string, unknown>): Promise<unknown> {
+async function executeTool(ctx: Context, name: string, argumentsValue: Record<string, unknown>): Promise<unknown> {
   return ctx.tools.execute({
-    callId: CallId(nextCallId()),
+    callId: await brandCallId(nextCallId()),
     name,
-    arguments: argumentsValue as unknown as JsonValue,
+    // JsonValue is re-exported from dsh-tools' main entry only in the 0.1.0-rc.5-era
+    // baseline, not in 0.1.2-rc.1+ (PCA F2c) — the erased `never` cast keeps this
+    // suite compiling against both; the runtime value is unaffected.
+    arguments: argumentsValue as unknown as never,
     signal: testToolSignal,
   })
 }
