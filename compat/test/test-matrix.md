@@ -303,14 +303,15 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 > 按负责人第二轮审阅意见补齐：墓碑容量预算（内存有界）、release/confirm 业务账本证据、
 > 干净安装口径拆分、长时负载与资源释放。
 
-### 12.1 unknown 墓碑容量预算（maxUnknown）
+### 12.1 unknown 墓碑容量预算（maxUnknown，含并发预留）
 
 | 项 | 设计/证据 |
 | --- | --- |
 | 配置 | 新增 `maxUnknown`（默认 1024，独立于 `maxEntries`）：墓碑**永不淘汰**但**有独立预算**——内存有界且不静默解除防重复副作用标记 |
+| 并发预留口径 | 预算按 **`unknown + 在途执行 ≤ maxUnknown`** 计数（`reserve`/`unknownFull` 同口径）：所有在途请求都可能进 unknown，故在途即预留——杜绝「检查时未满、多个不同 key 并发启动、全部失败后集体突破预算」；**成功结算即释放预留**（succeeded 不占墓碑预算） |
 | 满载行为 | 预算耗尽时**前置拒绝**新受保护执行（新错误码 `IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED` / `IdempotencyUnknownCapacityRejected`）：不淘汰旧墓碑，也不让副作用在没有「失败后可记录位置」的情况下执行；**同 key 历史 unknown 不被绕过**（重试仍 `STATE_UNKNOWN`） |
 | 恢复 | 对账 `release`/`confirm` 释放预算；`invalidate` 不影响墓碑（补偿只管 succeeded 缓存） |
-| 测试 | store 层 +2（预算拒绝/恢复、`maxUnknown` 非正校验）；pipeline 层 +1（前置拒绝→对账→恢复，attempts 断言副作用未执行）；相关套件 52/52 全绿 |
+| 测试 | store 层 +4（预算拒绝/恢复、`maxUnknown` 非正校验、**并发预留口径：maxUnknown=2 时同时在途 ≤2，全部失败后墓碑不突破**、**成功释放预留：一成一败预算正确**）；pipeline 层 +2（前置拒绝→对账→恢复 attempts 断言；**maxUnknown=2 时第 3 个并发新 key 在途预留阶段即被前置拒绝、全部失败后不突破、对账恢复**）；相关套件 69/69 全绿 |
 
 ### 12.2 对账决策核对业务账本（release/confirm 业务证据）
 
@@ -339,8 +340,34 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 | 内存（gc 后采样） | start 6MB → end 13MB（净增 +7MB）；采样 7–13MB 波动，unknown 恒 ≤64；后半段均值不高于前半段 >8MB 上界 |
 | 结论 | **ALL PASS**（正确性零失败；内存有界，无线性增长） |
 
-诚实声明：150 秒确定性负载 + gc 采样通过；**小时级连续运行与精确泄漏判定仍 NOT_RUN**
-（宽松上界仅捕获数量级泄漏；`--expose-gc` 为辅助观测，不单独证明无泄漏）。
+诚实声明：150 秒确定性负载 + gc 采样通过；**小时级连续运行已执行，见 §12.5**
+（§12.5 记录 3600s 全程曲线与清理后释放证据，替代此前的 NOT_RUN 状态）。
+
+### 12.5 小时级连续运行（3600s，`--expose-gc`，本地 link 宿主）
+
+运行：`node --expose-gc compat/stress/long-run.mjs 3600`（`LONG_TOTAL_JOIN_CAP=5000`）；
+日志 `compat/test/logs/long-run-1h-2026-09-07.log`（全量采样曲线在日志内）。
+
+| 负载/指标 | 实测 |
+| --- | --- |
+| 时长 / 周期 | 3600.0s / **50484 周期**（每周期：100 成功 key + 100 unknown key + 慢 join/取消 + 长期 owner join/cancel） |
+| 成功 key 去重 | 执行 **1009800** / 重放 **1009800**，**零重复**（1 小时约 200 万次受守卫调用） |
+| unknown 容量强制 | unknown 执行 666529、重试被阻止 333264；**满载前置拒绝 8753736 次**；墓碑全程封顶 `maxUnknown=64`（周期内联断言：历史墓碑不被绕过） |
+| 对账恢复 | release 323168 + confirm 10097；对账后新 key 可执行（预算恢复确认通过） |
+| 慢 join/取消 | joined 353388、cancelled 100968、owner 执行 10097（监听器不积累，无挂起） |
+| 长期 owner | 反复 join/cancel **5000 次后达总上限停止**（`LONG_TOTAL_JOIN_CAP`）；cancelled 4900、pending 封顶 100/100；owner 完成 → pending 全部结算 |
+| 内存（gc 后采样） | start **6MB** → end **12MB**（1 小时净增 **+6MB**，含长期 owner 宿主侧每 join 保留 ~4.5KB×5000≈22MB 预算内）；unknown 恒 ≤64；无持续线性增长 |
+| 清理后释放 | owner 完成 + 对账 + 插件卸载（dispose）后 heap 回落（final 11MB，与基线差 ≤15MB 上界内） |
+| 结论 | **ALL PASS**（正确性零失败；内存有界；owner 完成+对账+卸载后资源回落） |
+
+补充说明（实测性质，非缺陷）：
+- **宿主侧 dispatch 记录随在途 owner 保留**：同一长期未完成 owner 每次 join（含已取消）约
+  保留 4.5KB 宿主侧记录，**owner 完成即释放**（清理后回落为证）；插件侧 waiter 已改为
+  「abort 即从集合移除」的可脱离 join，不在 owner promise 上累积 `.then` 处理器。
+- **代次条目用毕即删**：`generations` 仅在「可能有陈旧 owner 未结算」期间驻留，小时级
+  运行 32 万次 release/confirm 后无累积（`growth=6MB` 即含该验证）。
+- 未观察项：跨重启边界（单进程语义）；精确逐对象泄漏判定需堆快照 diff，本轮以
+  gc 后曲线 + 清理释放 + 数量级上界覆盖。
 
 ### 12.4 干净安装口径（与 §11.1 一致）
 

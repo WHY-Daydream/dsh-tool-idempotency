@@ -54,10 +54,18 @@
   **永不淘汰**（淘汰=静默解除=延迟重复副作用）。代价：未对账的 unknown key 会持续
   占内存（每枚墓碑仅 key+指纹，极小），**对账（release/confirm）即其生命周期**；
   长期不决的 key 需操作方定期对账。`query` 可观测、`release`/`confirm` 可解除。
-- **unknown 墓碑容量预算**：新增 `maxUnknown`（默认 1024，独立于 `maxEntries`）。
-  墓碑**永不淘汰**但预算有界；预算耗尽时**新受保护执行前置拒绝**
-  （`IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED`），对账 `release`/`confirm` 后恢复。
-  避免「内存无限增长」与「静默解除墓碑」两个极端；长期不决的 key 需操作方定期对账。
+- **unknown 墓碑容量预算**：新增 `maxUnknown`（默认 1024，独立于 `maxEntries`），
+  按**并发预留口径**计数——`unknown + 在途执行 ≤ maxUnknown`（成功结算即释放预留，
+  杜绝并发全部失败后突破预算）。墓碑**永不淘汰**但预算有界；预算耗尽时**新受保护
+  执行前置拒绝**（`IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED`），对账 `release`/`confirm`
+  后恢复。避免「内存无限增长」与「静默解除墓碑」两个极端；长期不决的 key 需操作方
+  定期对账。
+- **join 可脱离（waiter 集合）**：join 中的 waiter 以集合形式挂在执行条目上，abort 即
+  从集合移除并移除监听器——长期未完成 owner 被反复 join/cancel 时不在 owner promise
+  上累积 `.then` 处理器（宿主侧 dispatch 记录仍随在途 owner 保留，owner 完成即释放）。
+- **代次条目用毕即删**：`generations` 只在「可能有陈旧 owner 未结算」期间驻留
+  （settle/fail 后、无在途时的 release/confirm/invalidate 后即删），避免随 key 数
+  无限增长。
 - **failed_safe 证据可来自抛错**：工具抛 `HarnessError(message, 'IDEMPOTENCY_NOT_COMMITTED')`
   （宿主会保留 `error.info.code`）或返回带证据码的错误结果均可进入 failed_safe；
   普通 Error 的自定义字段会被宿主错误映射丢弃，不能作为证据（无证据→unknown）。

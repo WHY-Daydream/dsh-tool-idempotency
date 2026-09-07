@@ -20,9 +20,16 @@
   （`error.info.code`）的错误结果时，视为「确定未提交」，释放锁且不留记录，重试允许
   重新执行。**无证据时不得凭错误码猜测提交状态**。
 - 新增配置 **`maxUnknown`（默认 1024）**：unknown 墓碑的独立容量预算（墓碑永不淘汰，
-  但内存有界）。预算耗尽时**新受保护执行被前置拒绝**（`IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED`，
-  不淘汰旧墓碑、不让副作用在没有「失败后可记录位置」的情况下执行），对账
-  `release`/`confirm` 后恢复。
+  但内存有界），按**并发预留口径**计数——`unknown + 在途执行 ≤ maxUnknown`，杜绝
+  「检查时未满、并发全部失败后突破预算」（成功结算即释放预留）。预算耗尽时**新受保护
+  执行被前置拒绝**（`IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED`，不淘汰旧墓碑、不让副作用
+  在没有「失败后可记录位置」的情况下执行），对账 `release`/`confirm` 后恢复。
+- **join 可脱离（waiter 集合）**：join 中的 waiter 以集合形式挂在执行条目上，abort 即
+  从集合移除并移除监听器——长期未完成 owner 被反复 join/cancel 时不在 owner promise
+  上累积 `.then` 处理器（宿主侧 dispatch 记录仍随在途 owner 保留，owner 完成即释放）。
+- **代次条目用毕即删**：`generations` 只在「可能有陈旧 owner 未结算」期间驻留
+  （settle/fail 后、无在途时的 release/confirm/invalidate 后即删），避免随 key 数
+  无限增长。
 - **Saga 缓存失效（K2 修复方向）**：新增 `ctx.get('toolIdempotency')` 接口——
   `query` / `release` / `confirm` / `invalidate`。
   - `invalidate(key)`：清除 succeeded 缓存并递增**代次**；旧 owner 晚到结算（owner+代次
