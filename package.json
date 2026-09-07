@@ -45,6 +45,7 @@
     "test:watch": "vitest",
     "test:unit": "vitest run tests/index.spec.ts tests/peer-range.spec.ts tests/canonicalize.spec.ts tests/store-regression.spec.ts",
     "test:p0": "vitest run tests/canonicalize.spec.ts tests/store-regression.spec.ts",
+    "test:correctness": "vitest run tests/correctness/*.spec.ts",
     "test:e2e": "vitest run tests/e2e.spec.ts",
     "lint": "oxlint ."
   },
