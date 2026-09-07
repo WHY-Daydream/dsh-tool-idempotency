@@ -511,6 +511,48 @@ Lua / WATCH-MULTI），不能沿用 GET→判断→DEL——作为分布式实�
 **保留不动**（已在兼容面，改名收益低）；如需可未来新增 `IDEMPOTENCY_EXECUTION_MISMATCH`
 或随大版本调整。
 
+## 14. transaction × idempotency 组合验收（GATE-TI 1-5，0.2.0 最后一关）
+
+> 负责人决定：**不从 0.2.0 scope 剥离**，继续解决组合兼容（手动 `invalidate` 不替代
+> 真实组合验收）。当前状态：**资产就绪、执行 BLOCKED-网络**（本地 registry 不可达；
+> 用户侧网络已通可执行）。
+
+### 14.1 调查结论（三层排查第一、二层：声明 vs API）
+
+| 层 | 结论 |
+| --- | --- |
+| 声明（peer 摊平） | transaction 0.1.0：cordis `>=4.0.1`、dsh-invariants `>=0.0.1-rc.1`（宽范围）；idempotency 0.2.0：cordis `>=4.0.1` + dsh-invariants/dsh-tools UNION（含 0.1.x 线）；宿主 current-latest（cordis 4.0.2 / dsh-tools+dsh-invariants 0.1.2-rc.1）——**peer ranges 与宿主有交集，非「范围不交集」** |
+| 代码（API） | transaction 在本地宿主（cordis 4.x + invariants 0.1.x）下 **build PASS + unit 14/14 PASS**——**无 API 冲突**，非 adapter 场景 |
+| 结论 | 非扩 peer range、非 adapter；ERESOLVE 若存在需**真实安装的精确报错**定位（本地复现 BLOCKED-网络），不得用 --legacy-peer-deps/--force/手工 patch 绕过 |
+
+### 14.2 GATE-TI 状态
+
+| Gate | 内容 | 状态 |
+| --- | --- | --- |
+| TI-1 | 两插件在目标 host clean install，无 peer 绕过 | **BLOCKED-网络**（fixture package.json 就绪） |
+| TI-2 | 真实调用链（host → transaction → idempotency → tool → side effect）执行 | **BLOCKED-网络**（combo-acceptance.mjs 场景 1 就绪） |
+| TI-3 | commit / rollback / unknown 三条关键路径 | **BLOCKED-网络**（脚本场景 1-3 就绪） |
+| TI-4 | stale executionId 不得作用于新 transaction execution | **BLOCKED-网络**（脚本场景 4 就绪；store/pipeline 层等价回归 Case 1-4 已 12/12） |
+| TI-5 | 组合测试进入 run-all/acceptance | **已纳入**（fixture 未安装 → run-all 报 BLOCKED 且整体失败，不留人工验证记录） |
+
+### 14.3 资产与兼容矩阵
+
+- fixture：`compat/fixtures/transaction-combo-0.2.0/`——宿主精确版本 + transaction 0.1.0
+  （file: tgz）+ idempotency 0.2.0 候选（file: tgz）；`combo-acceptance.mjs` 覆盖
+  4 场景（commit/rollback/unknown/stale fencing），内置 `[VERSION]` 校验。
+- run-all：`combo:transaction×idempotency` 阶段（GATE-TI-5，随 fixture 就绪自动执行）。
+- 兼容矩阵（待网络恢复 / 用户侧执行）：
+
+| Host/Core | transaction | idempotency | clean install | runtime composition |
+| --- | --- | --- | --- | --- |
+| current-latest（cordis 4.0.2 / dsh-tools+dsh-invariants 0.1.2-rc.1） | 0.1.0 | 0.2.0 | BLOCKED-网络 | BLOCKED-网络 |
+| prev-release（0.1.1-rc.2 线） | 0.1.0 | 0.2.0 | BLOCKED-网络 | BLOCKED-网络 |
+
+执行命令（网络恢复后）：
+- `cd compat/fixtures/transaction-combo-0.2.0 && npm ci`（无 peer 绕过）→ `node combo-acceptance.mjs`
+- 全套件：`node compat/test/run-all.mjs`（combo 阶段随 fixture 就绪自动执行）
+- prev-release 组合 fixture 待执行时按同法建立（transaction peer 范围对 0.1.1-rc.2 线理论兼容）。
+
 
 
 
