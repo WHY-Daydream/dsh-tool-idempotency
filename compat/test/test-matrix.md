@@ -525,18 +525,25 @@ Lua / WATCH-MULTI），不能沿用 GET→判断→DEL——作为分布式实�
 | 代码（API） | transaction 在本地宿主（cordis 4.x + invariants 0.1.x）下 **build PASS + unit 14/14 PASS**——**无 API 冲突**，非 adapter 场景 |
 | 结论 | **#3 状态：BLOCKED — exact peer-resolution path not yet captured**（2026-09-07 修正，见下） |
 
-**#3 transaction × idempotency clean-install ERESOLVE 状态块**
+**#3 transaction × idempotency clean-install ERESOLVE — root cause 已定位并修复（2026-09-07）**
 
-已排除：
-- ✅ transaction 与目标 host 的直接 peer ranges 有交集（非「范围不交集」）
-- ✅ transaction 在目标 host **build PASS + unit 14/14 PASS**（无 API 冲突，非 adapter 场景）
-- ✅ **`@deepseek-ai/schemastery@3.18.1` 确实存在于公开 npm registry**（registry 已有 3.18.2）
-  ——此前「registry 无法解析」的假设已被反证，**从嫌疑列表移除**
+根因：**transaction 的 peer 声明 `>=0.0.1-rc.1` 写窄**——node-semver 预发布规则下，
+预发布版本只匹配「范围中含同 [major,minor,patch] 三元组的预发布比较器」的范围；
+`>=0.0.1-rc.1` 的三元组为 [0,0,1]，因此 **0.1.x-rc.y 全部宿主线（0.1.0-rc.5 /
+0.1.1-rc.2 / 0.1.2-rc.1）均不匹配** → transaction peer 冲突（ERESOLVE 真实存在）。
 
-尚未确定：
-- ⛔ ERESOLVE 具体来自哪条 **transitive peer edge**——仅比较两个插件顶层 peerDependencies
-  不足以证明整棵 Arborist dependency tree 可解；ERESOLVE 是依赖树/peer resolution 错误
-  （非 registry 网络错误）；`--legacy-peer-deps` 绕过契约，不得用于 GATE-TI-1
+修复（transaction 0.1.0，独立仓库 dsh-tool-transaction）：peer 扩为与 idempotency
+对齐的 UNION（`>=0.0.1-rc.1 <0.1.0-0 || >=0.1.0-0 <0.2.0-0 || >=0.1.1-0 <0.2.0-0 ||
+>=0.1.2-0 <0.2.0-0 || >=0.1.3-0 <0.2.0-0`）——semver 验证对 0.0.1-rc.1 / 0.1.0-rc.5 /
+0.1.1-rc.2 / 0.1.2-rc.1 / 0.1.2 / 0.1.3 **全部 SATISFIED**；transaction build PASS +
+unit 14/14 回归；tgz 重打（8915 B）。
+
+剩余：本环境离线 ERESOLVE 复现（`npm install --offline`）仍报
+`Found: @deepseek-ai/dsh-invariants@undefined`（idempotency UNION peer）——为
+**离线缓存元数据缺失的 artifact**（缓存缺 0.1.2-rc.1 元数据 → 版本无法解析 → 假冲突；
+semver 已确定性证明 0.1.2-rc.1 SATISFIES UNION；修复后 transaction 的 peer 已从
+冲突图消失）。**真实在线 npm ci 确认归 #4 / GATE-TI-1**（用户侧网络已通可执行；
+预期 PASS——所有 peer edges 语义满足）。
 
 ### 14.2 GATE-TI 状态
 
@@ -547,7 +554,7 @@ Lua / WATCH-MULTI），不能沿用 GET→判断→DEL——作为分布式实�
 | TI-3 | commit / rollback / unknown 三条关键路径 | 🟡 link-mode 验证通过（场景 1-3）；⏳ packaged 执行 pending |
 | TI-4 | stale executionId 不得作用于新 transaction execution | ✅ link-mode 回归通过（场景 4，组合 18/18 ALL PASS）；⏳ packaged 执行 pending |
 | TI-5 | 组合测试进入 run-all/acceptance | ✅ 已接入 run-all；⏳ clean-install 执行 pending（未安装 → BLOCKED 且整体失败） |
-| ERESOLVE root cause | 精确 dependency edge | ⛔ UNKNOWN — 待 `npm ci --loglevel verbose` 捕获 |
+| ERESOLVE root cause | 精确 dependency edge | ✅ **已定位并修复**（transaction peer `>=0.0.1-rc.1` 写窄 → 扩为 UNION；semver 全 SATISFIED + build/unit 回归 + tgz 重打）；在线 npm ci 确认归 TI-1 |
 
 最终 verdict（负责人 2026-09-07）：**0.2.0 HOLD（已收窄）**——不是 correctness bug、
 不是 fencing bug、不是 transaction runtime bug；唯一未决是 **尚未证明真实 npm dependency
