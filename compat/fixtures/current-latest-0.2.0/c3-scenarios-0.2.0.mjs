@@ -140,7 +140,7 @@ await runScenario('waiter 取消：owner 启动后 waiter 确认 join 再被 abo
   return 'PASS'
 })
 
-// ---------- 3. K1 修复：提交后 abort → unknown 阻止重试（对照 0.1.3 effects=2） ----------
+// ---------- 3. K1 修复（对账=已提交）：提交后 abort → unknown，confirm 验证结果后重放 ----------
 function sleepWithAbort(ms, signal) {
   return new Promise((resolve, reject) => {
     const fail = () => reject(new Error('aborted'))
@@ -150,33 +150,59 @@ function sleepWithAbort(ms, signal) {
   })
 }
 
-await runScenario('K1 修复：提交后 abort → unknown：重试被阻止（effects 不增），release 对账后才重新执行', async () => {
+await runScenario('K1 修复（对账=已提交）：提交后 abort → unknown 阻止重试，confirm 验证结果后重放（副作用不 +1）', async () => {
   let effects = 0
+  const ledger = [] // 业务账本：副作用提交即入账
   const ctx = await boot({ rules: [{ tool: 'slow' }] })
   ctx.tools.register(defineContentToolFixture({ name: 'slow', description: 'slow', parameters: {},
-    async execute(_args, exec) { effects += 1; await sleepWithAbort(60, exec.signal); return [{ type: 'text', text: 'ok' }] } }))
+    async execute(_args, exec) { effects += 1; ledger.push(`commit-${effects}`); await sleepWithAbort(60, exec.signal); return [{ type: 'text', text: `ok-${effects}` }] } }))
   const ctrl = new AbortController()
   const first = fire(ctx, 'slow', {}, ctrl.signal)
-  setTimeout(() => ctrl.abort(), 20) // 提交后取消 → 响应丢失（副作用已执行）
+  setTimeout(() => ctrl.abort(), 20) // 提交后取消 → 响应丢失（副作用已入账）
   const r1 = await withTimeout(first, 1000, '提交后 abort 首调未结束')
   assert.equal(r1.isError, true)
   assert.equal(effects, 1, '首调已提交副作用')
+  assert.deepEqual(ledger, ['commit-1'], '业务账本显示已提交')
 
   // 0.2.0：重试不得再次执行（对照 0.1.3 的 effects=2 缺陷复现）
   const r2 = await fire(ctx, 'slow', {}, new AbortController().signal)
-  assert.equal(r2.isError, true, '重试应被 unknown 阻止（0.1.3 下这里会重新执行并 effects=2）')
   assert.equal(r2.error?.info?.code, 'IDEMPOTENCY_STATE_UNKNOWN', '重试应返回结构化 UNKNOWN 错误')
   assert.equal(effects, 1, 'K1 修复：重试未新增副作用')
 
-  // 对账确认未提交 → release → 允许重新执行
+  // 对账=已提交 → confirm 写入验证结果 → 重试重放，副作用不 +1
   const api = ctx.get('toolIdempotency')
-  const state = api.query('slow', {})
-  assert.equal(state?.state, 'unknown', 'query 应报告 unknown 状态')
-  api.release('slow', {})
+  assert.equal(api.query('slow', {})?.state, 'unknown')
+  api.confirm('slow', {}, { isError: false, content: [{ type: 'text', text: 'ok-1' }], value: [{ type: 'text', text: 'ok-1' }] })
   const r3 = await fire(ctx, 'slow', {}, new AbortController().signal)
   assert.equal(r3.isError, false)
-  assert.equal(effects, 2, 'release 对账后允许重新执行（受控解除，非自动）')
-  console.log(`  K1 修复确认：0.1.3 effects=2（自动重执行）→ 0.2.0 重试 blocked（effects=1）→ release 后受控重新执行（effects=2）`)
+  assert.equal(r3.content[0].text, 'ok-1')
+  assert.equal(effects, 1, 'confirm 后重放验证结果，不再执行副作用')
+  assert.deepEqual(ledger, ['commit-1'], '账本不新增（无重复副作用）')
+  console.log(`  K1 修复确认（对账=已提交）：0.1.3 effects=2（自动重执行）→ 0.2.0 重试 blocked → confirm 后重放（effects=1，账本一条）`)
+  return 'PASS'
+})
+
+// ---------- 3b. K1 修复（对账=未提交）：release 后重新执行，账本恰一条新提交 ----------
+await runScenario('K1 修复（对账=未提交）：release 后重新执行，账本恰新增一条（无重复）', async () => {
+  let effects = 0
+  const ledger = []
+  const ctx = await boot({ rules: [{ tool: 'slow' }] })
+  ctx.tools.register(defineContentToolFixture({ name: 'slow', description: 'slow', parameters: {},
+    async execute() { effects += 1; if (effects === 1) throw new Error('failed before commit'); ledger.push(`commit-${effects}`); return [{ type: 'text', text: `ok-${effects}` }] } }))
+  const r1 = await fire(ctx, 'slow', {}, new AbortController().signal)
+  assert.equal(r1.isError, true)
+  assert.equal(effects, 1)
+  assert.deepEqual(ledger, [], '业务账本为空：确认未提交')
+
+  // 对账=确认未提交 → release → 重新执行
+  const api = ctx.get('toolIdempotency')
+  assert.equal(api.query('slow', {})?.state, 'unknown')
+  api.release('slow', {})
+  const r2 = await fire(ctx, 'slow', {}, new AbortController().signal)
+  assert.equal(r2.isError, false)
+  assert.equal(effects, 2)
+  assert.deepEqual(ledger, ['commit-2'], '账本恰一条新提交，无重复副作用')
+  console.log(`  K1 修复确认（对账=未提交）：release 后重新执行（effects=2），账本仅一条新提交`)
   return 'PASS'
 })
 

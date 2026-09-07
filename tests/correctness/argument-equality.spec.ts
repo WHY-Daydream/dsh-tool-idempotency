@@ -149,7 +149,7 @@ describe('参数判等：哈希碰撞回归（0.2.0 SHA-256 修复 O1）', () =>
     const r1 = await executeTool(ctx, 'create_order', COLLISION_A)
     const r2 = await executeTool(ctx, 'create_order', COLLISION_B)
     console.log(
-      '[O1-FIXED] collision pair: A=%j B=%j fpA=%s fpB=%s → attempts=%d (SHA-256 无碰撞，各自执行)',
+      '[O1-FIXED] collision pair: A=%j B=%j fpA=%s fpB=%s → attempts=%d (SHA-256 下该实测碰撞对不再碰撞，各自执行；非绝对免碰撞)',
       COLLISION_A, COLLISION_B,
       fingerprintOf({ name: 'create_order', arguments: COLLISION_A } as never),
       fingerprintOf({ name: 'create_order', arguments: COLLISION_B } as never),

@@ -228,6 +228,34 @@ describe('0.2.0 unknown 五要点补测：确认未提交后才允许重新执�
     }
   })
 
+  it('墓碑预算：maxUnknown 满时新 key 前置拒绝（副作用不执行），对账后恢复', async () => {
+    let attempts = 0
+    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }], maxUnknown: 2 })
+    registerTool(ctx, 'create_order', async () => {
+      attempts += 1
+      throw new Error('boom')
+    })
+    await executeTool(ctx, 'create_order', { orderId: 'k1' }).catch(() => undefined)
+    await executeTool(ctx, 'create_order', { orderId: 'k2' }).catch(() => undefined)
+
+    // 第 3 个新 key：前置拒绝（IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED），副作用不执行
+    const r3 = await executeTool(ctx, 'create_order', { orderId: 'k3' })
+    expect(r3).toMatchObject({ isError: true, error: { info: { code: 'IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED' } } })
+    expect(attempts).toBe(2) // k3 未执行
+
+    // 历史 unknown 不被绕过
+    const rk1 = await executeTool(ctx, 'create_order', { orderId: 'k1' })
+    expect(rk1).toMatchObject({ isError: true, error: { info: { code: 'IDEMPOTENCY_STATE_UNKNOWN' } } })
+
+    // 对账 release 一个 → 新 key 可执行；失败后仍有位置记录 unknown
+    idempotencyApi(ctx).release('create_order', { orderId: 'k1' })
+    const r4 = await executeTool(ctx, 'create_order', { orderId: 'k3' })
+    expect(r4).toMatchObject({ isError: true }) // 工具仍抛错 → 再次 unknown
+    expect(attempts).toBe(3)
+    expect(idempotencyApi(ctx).query('create_order', { orderId: 'k3' })?.state).toBe('unknown')
+    expect(idempotencyApi(ctx).query('create_order', { orderId: 'k2' })?.state).toBe('unknown') // 历史墓碑仍在
+  })
+
   it('陈旧 owner 晚到抛错不写回 unknown（release 解除后旧执行失败不重新上锁）', async () => {
     let attempts = 0
     const gate = deferred<ContentBlock[]>()
@@ -266,5 +294,76 @@ describe('0.2.0 unknown 五要点补测：确认未提交后才允许重新执�
     const r2 = await executeTool(ctx, 'create_order', { orderId: 'a' })
     expect(r2).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-2' }] })
     expect(attempts).toBe(2) // 有证据确定未提交 → 重试允许
+  })
+})
+
+describe('0.2.0 对账决策必须核对业务账本（非仅调用 release 后工具可再运行）', () => {
+  it('对账=已提交：confirm 写入验证结果，重试重放且账本不新增（无重复副作用）', async () => {
+    const ledger: string[] = []
+    let attempts = 0
+    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
+    registerTool(ctx, 'create_order', async () => {
+      attempts += 1
+      // 模拟：副作用已提交（账本写入），但响应在返回前丢失（抛错）
+      ledger.push(`order-${attempts}`)
+      throw new Error('response lost after commit')
+    })
+    const r1 = await executeTool(ctx, 'create_order', { orderId: 'a' }).catch(() => undefined)
+    expect(ledger).toEqual(['order-1']) // 业务账本：已提交
+    expect(idempotencyApi(ctx).query('create_order', { orderId: 'a' })?.state).toBe('unknown')
+
+    // 重试：不得再次提交（账本不增）
+    const retry = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(retry).toMatchObject({ isError: true, error: { info: { code: 'IDEMPOTENCY_STATE_UNKNOWN' } } })
+    expect(ledger).toEqual(['order-1'])
+
+    // 下游对账：账本显示已提交 → confirm 验证结果 → 重试重放，账本仍一条
+    idempotencyApi(ctx).confirm('create_order', { orderId: 'a' }, {
+      isError: false,
+      content: [{ type: 'text', text: 'order-1' }],
+      value: [{ type: 'text', text: 'order-1' }],
+    })
+    const replay = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(replay).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
+    expect(ledger).toEqual(['order-1']) // 重放不新增
+    expect(attempts).toBe(1)
+  })
+
+  it('对账=确认未提交：release 后重新执行，账本恰新增一条（无重复）', async () => {
+    const ledger: string[] = []
+    let attempts = 0
+    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
+    registerTool(ctx, 'create_order', async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('boom before commit') // 未提交（账本为空）
+      ledger.push(`order-${attempts}`)
+      return [{ type: 'text', text: `order-${attempts}` }]
+    })
+    await executeTool(ctx, 'create_order', { orderId: 'a' }).catch(() => undefined)
+    expect(ledger).toEqual([]) // 业务账本为空：确认未提交
+    expect(idempotencyApi(ctx).query('create_order', { orderId: 'a' })?.state).toBe('unknown')
+
+    idempotencyApi(ctx).release('create_order', { orderId: 'a' }) // 对账确认未提交 → 解除
+    const r2 = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(r2).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-2' }] })
+    expect(ledger).toEqual(['order-2']) // 账本恰一条新提交，无重复
+    expect(attempts).toBe(2)
+  })
+
+  it('对账=仍无法确定：保持 unknown，重试持续被阻止', async () => {
+    let attempts = 0
+    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
+    registerTool(ctx, 'create_order', async () => {
+      attempts += 1
+      throw new Error('boom')
+    })
+    await executeTool(ctx, 'create_order', { orderId: 'a' }).catch(() => undefined)
+    // 下游无法确定 → 不 release 不 confirm
+    const r1 = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(r1).toMatchObject({ isError: true, error: { info: { code: 'IDEMPOTENCY_STATE_UNKNOWN' } } })
+    const r2 = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(r2).toMatchObject({ isError: true, error: { info: { code: 'IDEMPOTENCY_STATE_UNKNOWN' } } })
+    expect(attempts).toBe(1)
+    expect(idempotencyApi(ctx).query('create_order', { orderId: 'a' })?.state).toBe('unknown')
   })
 })

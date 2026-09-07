@@ -196,7 +196,7 @@ describe('MemoryStore P0 — owner-scoped settlements', () => {
 describe('MemoryStore P0 — TTL and delete boundaries', () => {
   it('TTL governs the succeeded cache only, never an in-flight lock', () => {
     let now = 1000
-    const store = new MemoryStore(10, 10, () => now)
+    const store = new MemoryStore(10, 10, 10, () => now)
     const r = store.reserve('K', 'fp-k')
     expect(r).not.toBeNull()
     now = 2 ** 40 // arbitrarily far future
@@ -268,5 +268,44 @@ describe('MemoryStore 0.2.0 — unknown 墓碑与 failed_safe 证据（store 层
     store.fail('K', r!.owner, new Error('late boom'))
     expect(store.get('K')).toBeUndefined() // 无墓碑写回
     expect(store.size).toBe(0)
+  })
+
+  it('墓碑预算：满时 reserve 前置拒绝（不淘汰旧墓碑），release 对账后恢复', () => {
+    const store = new MemoryStore(4, 4, 2) // maxUnknown = 2
+    const a = store.reserve('A', 'fp-a')
+    store.fail('A', a!.owner, new Error('x'))
+    const b = store.reserve('B', 'fp-b')
+    store.fail('B', b!.owner, new Error('x'))
+    expect(store.get('A')?.state).toBe('unknown')
+    expect(store.get('B')?.state).toBe('unknown')
+    expect(store.unknownFull).toBe(true)
+
+    // 满时新 key 前置拒绝：不执行、不淘汰旧墓碑
+    expect(store.reserve('C', 'fp-c')).toBeNull()
+    expect(store.get('A')?.state).toBe('unknown') // 历史 unknown 不被绕过
+    expect(store.get('B')?.state).toBe('unknown')
+    expect(store.size).toBe(2)
+
+    // 对账 release 一个 → 恢复可执行；再失败仍有位置记录 unknown
+    store.release('A')
+    expect(store.unknownFull).toBe(false)
+    const c = store.reserve('C', 'fp-c')
+    expect(c).not.toBeNull()
+    store.fail('C', c!.owner, new Error('x'))
+    expect(store.get('C')?.state).toBe('unknown')
+    expect(store.get('B')?.state).toBe('unknown') // 历史墓碑仍在
+    expect(store.size).toBe(2)
+
+    // confirm 同样释放预算
+    store.confirm('C', 'fp-c', okResult(1), 1000)
+    expect(store.get('C')?.state).toBe('succeeded')
+    const d = store.reserve('D', 'fp-d')
+    expect(d).not.toBeNull()
+    store.settle('D', d!.owner, okResult(1), 1000)
+    expect(store.size).toBe(3) // B(unknown) + C(succeeded) + D(succeeded)
+  })
+
+  it('rejects a non-positive maxUnknown', () => {
+    expect(() => new MemoryStore(1, 1, 0)).toThrow(/maxUnknown/)
   })
 })

@@ -15,7 +15,10 @@
  * 释放但不写缓存/墓碑——旧执行不能把已失效的结果写回。
  *
  * 预算：executing 受 maxInFlight 限制（满则拒绝，不淘汰）；succeeded 受 maxEntries
- * FIFO 限制（只淘汰已完成项，不碰执行锁与 unknown 墓碑）。
+ * FIFO 限制（只淘汰已完成项，不碰执行锁与 unknown 墓碑）；**unknown 墓碑受独立预算
+ * maxUnknown 限制**（默认 1024）：墓碑**永不淘汰**（淘汰=静默解除=延迟重复副作用），
+ * 预算耗尽时 reserve 前置拒绝新执行（不淘汰旧墓碑、不让副作用在没有「失败后可记录
+ * 位置」的情况下执行），对账（release/confirm）后恢复。
  */
 
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
@@ -75,18 +78,23 @@ export class MemoryStore {
   private readonly generations = new Map<string, number>()
   private readonly maxEntries: number
   private readonly maxInFlight: number
+  private readonly maxUnknown: number
   private readonly now: () => number
   private nextOwner = 1
 
-  constructor(maxEntries: number, maxInFlight = 256, now: () => number = Date.now) {
+  constructor(maxEntries: number, maxInFlight = 256, maxUnknown = 1024, now: () => number = Date.now) {
     if (!Number.isInteger(maxEntries) || maxEntries < 1) {
       throw new Error(`dsh-tool-idempotency: invalid maxEntries ${maxEntries} — must be an integer >= 1`)
     }
     if (!Number.isInteger(maxInFlight) || maxInFlight < 1) {
       throw new Error(`dsh-tool-idempotency: invalid maxInFlight ${maxInFlight} — must be an integer >= 1`)
     }
+    if (!Number.isInteger(maxUnknown) || maxUnknown < 1) {
+      throw new Error(`dsh-tool-idempotency: invalid maxUnknown ${maxUnknown} — must be an integer >= 1`)
+    }
     this.maxEntries = maxEntries
     this.maxInFlight = maxInFlight
+    this.maxUnknown = maxUnknown
     this.now = now
   }
 
@@ -119,6 +127,9 @@ export class MemoryStore {
       )
     }
     if (this.executing.size >= this.maxInFlight) return null
+    // 墓碑预算耗尽：拒绝新执行。不淘汰旧墓碑（淘汰=静默解除），也不让副作用在
+    // 没有「失败后可记录位置」的情况下执行（对账 release/confirm 后恢复）。
+    if (this.unknown.size >= this.maxUnknown) return null
     let resolve!: (result: ToolExecutionResult) => void
     let reject!: (error: unknown) => void
     const promise = new Promise<ToolExecutionResult>((res, rej) => {
@@ -203,6 +214,11 @@ export class MemoryStore {
   /** Total live records (executing locks + cache + unknown). */
   get size(): number {
     return this.executing.size + this.cache.size + this.unknown.size
+  }
+
+  /** unknown 墓碑预算是否耗尽（index.ts 据此前置拒绝，区分于在途容量拒绝）。 */
+  get unknownFull(): boolean {
+    return this.unknown.size >= this.maxUnknown
   }
 
   private generationOf(key: string): number {

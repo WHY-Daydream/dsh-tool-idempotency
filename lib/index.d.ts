@@ -46,6 +46,15 @@ export interface Config {
      *  in-flight locks, and unknown tombstones are exempt from this cap. */
     maxEntries?: number;
     /**
+     * Unknown-tombstone budget (default 1024). Tombstones are **never evicted**
+     * (eviction would silently re-open the duplicate-side-effect window); when
+     * the budget is exhausted, new guarded executions are refused up front with
+     * `IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED` — no side effect runs without a
+     * guaranteed place to record an ambiguous failure. Reconcile unknown keys
+     * (`release`/`confirm`) to free budget.
+     */
+    maxUnknown?: number;
+    /**
      * Simultaneous in-flight execution cap (default 256). When saturated, a new
      * guarded call is refused with a structured capacity error — it never runs
      * its side effect unprotected.

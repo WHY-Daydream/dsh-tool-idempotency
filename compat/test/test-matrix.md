@@ -197,6 +197,11 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 > 本轮按负责人审阅意见执行：打包 0.2.0 候选 tgz → 隔离 fixture 确认实际加载版本 → 重跑；
 > K1/K2 用真实 pipeline 复现脚本验证业务结果已改变；O1 单独记录处理状态；
 > 组合/负载补齐显式参数。**发布决策仍待负责人，本阶段只做候选验收。**
+>
+> **验收口径（2026-09-07 修订）**：本阶段完成的是「**归档运行验证通过**」（复用已验收
+> 宿主闭包 + 候选 tgz 解包 + 脚本版本校验）；「**干净安装验收**」（全新目录 `npm ci`
+> 同一份候选 tgz）因 registry tarball 下载超时 **BLOCKED-网络**——两者分开记账，
+> 不再使用「发布包级验收完成」表述。
 
 ### 11.1 候选包与隔离 fixture
 
@@ -205,18 +210,20 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 | 候选 tgz | `compat/acceptance/why-daydream-dsh-tool-idempotency-0.2.0.tgz`（18554 B） |
 | sha256 | `26e0abd58bd44ce1540fdb664260b1a7277900d6879245a1ab11cecaa84be47c`（`tgz-0.2.0.sha256`，发布门禁同一命令 `sha256sum -c`） |
 | 归档内部 name/version | `@why-daydream/dsh-tool-idempotency` / `0.2.0`（tar 读 package/package.json 实测） |
-| 隔离 fixture | `compat/fixtures/current-latest-0.2.0/`：registry 0.1.2-rc.1 闭包（cordis 4.0.2 + dsh-* 0.1.2-rc.1）+ 本地 0.2.0 候选 tgz；**脚本内核对实际加载版本 === 0.2.0**（`[VERSION] plugin loaded = 0.2.0`） |
+| 隔离 fixture（0.1.2-rc.1 线） | `compat/fixtures/current-latest-0.2.0/`：cordis 4.0.2 + dsh-* 0.1.2-rc.1 + 0.2.0 候选 tgz；脚本核对实际加载版本 === 0.2.0 |
+| 隔离 fixture（0.1.1-rc.2 线） | `compat/fixtures/prev-release-0.1.1-rc.2-0.2.0/`：0.2.0 候选包 × 上一发布线；脚本核对加载版本 === 0.2.0 |
 | 0.1.3 对照 | `compat/fixtures/current-latest/`（0.1.3 tgz 闭包，未改动） |
+| 干净安装 | **BLOCKED-网络**（registry tarball 下载超时；命令与重放步骤见 `compat/README.md`，网络恢复后 `npm install --package-lock-only` + 全新目录 `npm ci`） |
 
-**运行结果（0.2.0 候选，全部实际执行）**
+**归档运行结果（0.2.0 候选，全部实际执行；脚本内 `[VERSION] plugin loaded = 0.2.0`）**
 
-| 脚本 | 结果 | 关键断言 |
+| 脚本 | 0.1.2-rc.1 线 | 0.1.1-rc.2 线 |
 | --- | --- | --- |
-| baseline.mjs（无插件对照） | **PASS** | 无插件=无去重，pipeline 可用 |
-| regression.mjs | **PASS 14/14** | 其中 1 例按 0.2.0 契约改写：无证据失败→unknown 阻止重试，release 对账后重新执行（0.1.3 契约下该例为自动重执行 attempts=2） |
-| structured-result.mjs | **PASS** | value 重放逐字一致；meta/additionalContexts/concludesTurn 未覆盖（UNCOVERED，与 0.1.3 一致不宣称） |
-| c3-scenarios-0.2.0.mjs | **PASS 6/6** | K1 修复、证据契约、K2 修复、confirm 路径 + 2 例不变场景 |
-| agent-e2e.mjs | **PASS** | executions=1、toolResults=2、modelRequests=3（0.2.0 下 agent-loop 去重未破坏） |
+| baseline.mjs（无插件对照） | **PASS** | **PASS** |
+| regression.mjs | **PASS 14/14**（1 例按 0.2.0 契约改写） | **PASS 14/14**（同） |
+| structured-result.mjs | **PASS**（value 一致；meta/additionalContexts/concludesTurn UNCOVERED） | — |
+| c3-scenarios-0.2.0.mjs | **PASS 7/7** | — |
+| agent-e2e.mjs | **PASS**（executions=1） | — |
 
 **K1/K2 A/B 对照（同一 pipeline 复现脚本族，业务结果已改变）**
 
@@ -245,9 +252,9 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 
 | 项 | 0.1.3 | 0.2.0 |
 | --- | --- | --- |
-| 指纹算法 | FNV-1a 32 位（实测碰撞对 `12077584` → 不同请求被错误合并，**FAIL 复现**） | **SHA-256 + 规范化版本字节 `v1:`**（node:crypto 内建，无新增依赖） |
+| 指纹算法 | FNV-1a 32 位（实测碰撞对 `12077584` → 不同请求被错误合并，**FAIL 复现**） | **升级 SHA-256 + 规范化版本字节 `v1:`**（node:crypto 内建，无新增依赖）；**修复已知 FNV 碰撞对**，碰撞概率大幅降低但**不作绝对免碰撞保证**（任何哈希均有理论碰撞可能，契约以实测碰撞对回归为准） |
 | 回归证据 | argument-equality「已知限制实证」断言 attempts=1 | 同一用例**翻转为修复实证**：attempts=2、结果各自独立、可分别重放；canonicalize.spec 新增碰撞对回归 |
-| 状态 | FAIL（核心正确性缺陷，曾被「全部测试通过」掩盖） | **PASS（已修复）**；进程内缓存，无持久化迁移影响 |
+| 状态 | FAIL（核心正确性缺陷，曾被「全部测试通过」掩盖） | **PASS（已修复已知碰撞对）**；进程内缓存，无持久化迁移影响 |
 | 文档 | audit P1「计划升级 SHA-256」 | UPGRADE.md §5 / CHANGELOG [0.2.0] 记录 |
 
 ### 11.4 组合与压力测试显式参数（已测范围如实声明）
@@ -268,8 +275,9 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 | 长期未完成 owner | maxInFlight=1，5 次新 key | 持续容量拒绝且诊断含 `maxInFlight 1`，owner 完成即恢复 |
 | 持续运行周期清空 | 8 轮 × 200 新 key churn（FIFO 1024） | heap 采样收敛（44,38,34,47,48,49,48,47 MB），无线性增长 |
 
-**诚实声明**：现有压力为秒级确定性并发 + 相对内存采样；**尚未做小时级连续运行与
-`--expose-gc` 精确泄漏检测**（test-matrix §8 已列为局限）→ 该门禁 **NOT_RUN**（后续阶段）。
+**诚实声明**：现有压力为秒级确定性并发 + 相对内存采样；2026-09-07 已补 **150 秒长时负载
+（`--expose-gc`，见 §12.3）**；**小时级连续运行与精确泄漏判定仍 NOT_RUN**（宽松上界
+仅捕获数量级泄漏，`--expose-gc` 只是辅助观测，不单独证明无泄漏）。
 
 ### 11.5 semver 0.2.x 拒绝范围（宿主澄清）
 
@@ -289,6 +297,58 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
   store-regression.spec（+3 store 层契约）。
 - 候选产物：0.2.0 tgz + sha256；fixture `current-latest-0.2.0`（版本校验注入 + c3 新契约）。
 - 文档：UPGRADE.md §5、CHANGELOG [0.2.0]、本矩阵 §11。
+
+## 12. 第二轮候选验收补测（2026-09-07，分支 `0.2.0`）
+
+> 按负责人第二轮审阅意见补齐：墓碑容量预算（内存有界）、release/confirm 业务账本证据、
+> 干净安装口径拆分、长时负载与资源释放。
+
+### 12.1 unknown 墓碑容量预算（maxUnknown）
+
+| 项 | 设计/证据 |
+| --- | --- |
+| 配置 | 新增 `maxUnknown`（默认 1024，独立于 `maxEntries`）：墓碑**永不淘汰**但**有独立预算**——内存有界且不静默解除防重复副作用标记 |
+| 满载行为 | 预算耗尽时**前置拒绝**新受保护执行（新错误码 `IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED` / `IdempotencyUnknownCapacityRejected`）：不淘汰旧墓碑，也不让副作用在没有「失败后可记录位置」的情况下执行；**同 key 历史 unknown 不被绕过**（重试仍 `STATE_UNKNOWN`） |
+| 恢复 | 对账 `release`/`confirm` 释放预算；`invalidate` 不影响墓碑（补偿只管 succeeded 缓存） |
+| 测试 | store 层 +2（预算拒绝/恢复、`maxUnknown` 非正校验）；pipeline 层 +1（前置拒绝→对账→恢复，attempts 断言副作用未执行）；相关套件 52/52 全绿 |
+
+### 12.2 对账决策核对业务账本（release/confirm 业务证据）
+
+| 对账结果 | 后续动作 | 测试证据 |
+| --- | --- | --- |
+| 已提交成功 | `confirm` 正确结果 → 重试重放，账本不新增 | state-machine 账本用例：ledger 恰一条、attempts=1；c3-0.2.0「对账=已提交」场景 |
+| 确认未提交 / 已完成可靠补偿 | 才允许 `release` → 重新执行 | state-machine 账本用例：ledger 空→release→恰新增一条；c3-0.2.0「对账=未提交」场景（effects=2、ledger 仅 `commit-2`） |
+| 仍无法确定 | 保持 unknown，重试持续被阻止 | state-machine 账本用例（attempts 恒 1） |
+
+修正说明：0.2.0 首轮 c3 K1 场景以 `release` 结束（副作用已提交场景），本轮按负责人
+意见改为**账本核对后 `confirm`**——「提交后 abort」业务事实=已提交，`release` 会引入
+重复副作用；测试必须检查业务账本，不能只验证 release 后工具可再次运行。
+
+### 12.3 长时负载与资源释放（`--expose-gc`，150 秒，本地 link 宿主）
+
+运行：`node --expose-gc compat/stress/long-run.mjs 150`；日志
+`compat/test/logs/long-run-0.2.0-2026-09-07.log`。
+
+| 负载/指标 | 实测 |
+| --- | --- |
+| 时长 / 周期 | 150.0s / 2084 周期（每周期：100 成功 key + 100 unknown key + 并发 join/取消） |
+| 成功 key 去重 | 执行 41800 / 重放 41800，**零重复**（每个 key 恰执行 1 次） |
+| unknown 容量强制 | unknown 执行 13826、重试被阻止 13825；**满载前置拒绝 361175 次**；墓碑全程封顶 `maxUnknown=64` |
+| 对账恢复 | release 13409 + confirm 417；恢复后新 key 可执行 |
+| 并发 join/取消 | joined 14588、cancelled 4168、owner 执行 417（监听器不积累，无挂起） |
+| 内存（gc 后采样） | start 6MB → end 13MB（净增 +7MB）；采样 7–13MB 波动，unknown 恒 ≤64；后半段均值不高于前半段 >8MB 上界 |
+| 结论 | **ALL PASS**（正确性零失败；内存有界，无线性增长） |
+
+诚实声明：150 秒确定性负载 + gc 采样通过；**小时级连续运行与精确泄漏判定仍 NOT_RUN**
+（宽松上界仅捕获数量级泄漏；`--expose-gc` 为辅助观测，不单独证明无泄漏）。
+
+### 12.4 干净安装口径（与 §11.1 一致）
+
+- 本阶段 = **归档运行验证通过**（复用已验收宿主闭包 + 候选 tgz 解包 + 脚本版本校验）；
+  **干净安装验收 BLOCKED-网络**（registry tarball 下载超时）。
+- 上一发布线（0.1.1-rc.2）**0.2.0 候选包**归档运行：baseline OK、regression 14/14
+  （`compat/fixtures/prev-release-0.1.1-rc.2-0.2.0/`，版本校验已注入）。
+- 网络恢复后命令与步骤：`compat/README.md`「0.2.0 候选验收 fixture」。
 
 
 

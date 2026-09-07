@@ -53,6 +53,15 @@ export interface Config {
    *  in-flight locks, and unknown tombstones are exempt from this cap. */
   maxEntries?: number
   /**
+   * Unknown-tombstone budget (default 1024). Tombstones are **never evicted**
+   * (eviction would silently re-open the duplicate-side-effect window); when
+   * the budget is exhausted, new guarded executions are refused up front with
+   * `IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED` — no side effect runs without a
+   * guaranteed place to record an ambiguous failure. Reconcile unknown keys
+   * (`release`/`confirm`) to free budget.
+   */
+  maxUnknown?: number
+  /**
    * Simultaneous in-flight execution cap (default 256). When saturated, a new
    * guarded call is refused with a structured capacity error — it never runs
    * its side effect unprotected.
@@ -65,6 +74,7 @@ export interface Config {
 export const Config: z<Config> = z.object({
   ttl: z.number().default(3600),
   maxEntries: z.number().default(1024),
+  maxUnknown: z.number().default(1024),
   maxInFlight: z.number().default(256),
   rules: z.array(z.object({
     tool: z.string(),
@@ -79,6 +89,8 @@ const KEY_MISMATCH = 'IDEMPOTENCY_KEY_MISMATCH'
 const CAPACITY_REJECTED = 'IDEMPOTENCY_CAPACITY_REJECTED'
 /** Structured error code for an auto-retry blocked by an unknown commit state. */
 const STATE_UNKNOWN = 'IDEMPOTENCY_STATE_UNKNOWN'
+/** Structured error code for a refused claim (unknown-tombstone budget exhausted). */
+const UNKNOWN_CAPACITY_REJECTED = 'IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED'
 
 /** 0.2.0 状态查询/解除/失效接口（挂载于 ctx.toolIdempotency）。 */
 export interface ToolIdempotencyApi {
@@ -183,12 +195,16 @@ interface CompiledRule {
 export function apply(ctx: Context, config: Config): void {
   const ttlSeconds = config.ttl as number
   const maxEntries = config.maxEntries as number
+  const maxUnknown = config.maxUnknown as number
   const maxInFlight = config.maxInFlight as number
   if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1) {
     throw new Error(`dsh-tool-idempotency: invalid ttl ${ttlSeconds} — must be an integer >= 1 (seconds)`)
   }
   if (!Number.isInteger(maxEntries) || maxEntries < 1) {
     throw new Error(`dsh-tool-idempotency: invalid maxEntries ${maxEntries} — must be an integer >= 1`)
+  }
+  if (!Number.isInteger(maxUnknown) || maxUnknown < 1) {
+    throw new Error(`dsh-tool-idempotency: invalid maxUnknown ${maxUnknown} — must be an integer >= 1`)
   }
   if (!Number.isInteger(maxInFlight) || maxInFlight < 1) {
     throw new Error(`dsh-tool-idempotency: invalid maxInFlight ${maxInFlight} — must be an integer >= 1`)
@@ -201,7 +217,7 @@ export function apply(ctx: Context, config: Config): void {
     return { regex: wildcardToRegExp(rule.tool), mode: rule.mode ?? 'reuse', keyArg: rule.keyArg }
   })
 
-  const store = new MemoryStore(maxEntries, maxInFlight)
+  const store = new MemoryStore(maxEntries, maxInFlight, maxUnknown)
 
   /** API 用 key 解析：命中规则（非 off）才有效。 */
   function resolveApiKey(name: string, argumentsValue: Record<string, unknown>): string | undefined {
@@ -294,6 +310,15 @@ export function apply(ctx: Context, config: Config): void {
 
     // Fresh execution. Claim the in-flight slot synchronously before the tool
     // body can run, so two concurrent callers cannot both observe a miss.
+    // 墓碑预算耗尽时**前置拒绝**：不淘汰旧 unknown，也不让副作用在没有「失败后
+    // 可记录位置」的情况下执行。
+    if (store.unknownFull) {
+      return idempotencyError(
+        `idempotency unknown-state budget reached (maxUnknown ${maxUnknown}) for tool \`${exec.name}\` — refusing the call; reconcile unknown keys via release/confirm, then retry`,
+        UNKNOWN_CAPACITY_REJECTED,
+        'IdempotencyUnknownCapacityRejected',
+      )
+    }
     const reservation = store.reserve(key, fingerprint)
     if (reservation === null) {
       return idempotencyError(

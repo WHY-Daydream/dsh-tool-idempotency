@@ -15,7 +15,10 @@
  * 释放但不写缓存/墓碑——旧执行不能把已失效的结果写回。
  *
  * 预算：executing 受 maxInFlight 限制（满则拒绝，不淘汰）；succeeded 受 maxEntries
- * FIFO 限制（只淘汰已完成项，不碰执行锁与 unknown 墓碑）。
+ * FIFO 限制（只淘汰已完成项，不碰执行锁与 unknown 墓碑）；**unknown 墓碑受独立预算
+ * maxUnknown 限制**（默认 1024）：墓碑**永不淘汰**（淘汰=静默解除=延迟重复副作用），
+ * 预算耗尽时 reserve 前置拒绝新执行（不淘汰旧墓碑、不让副作用在没有「失败后可记录
+ * 位置」的情况下执行），对账（release/confirm）后恢复。
  */
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools';
 /** 工具结果中「确定未提交」的证据码（failed_safe）。 */
@@ -46,9 +49,10 @@ export declare class MemoryStore {
     private readonly generations;
     private readonly maxEntries;
     private readonly maxInFlight;
+    private readonly maxUnknown;
     private readonly now;
     private nextOwner;
-    constructor(maxEntries: number, maxInFlight?: number, now?: () => number);
+    constructor(maxEntries: number, maxInFlight?: number, maxUnknown?: number, now?: () => number);
     /**
      * Look up a key. executing > unknown > succeeded（succeeded 按 TTL 惰性过期；
      * unknown 无过期——不自动回到可重执行）。
@@ -78,6 +82,8 @@ export declare class MemoryStore {
     delete(key: string): void;
     /** Total live records (executing locks + cache + unknown). */
     get size(): number;
+    /** unknown 墓碑预算是否耗尽（index.ts 据此前置拒绝，区分于在途容量拒绝）。 */
+    get unknownFull(): boolean;
     private generationOf;
     /** Detach the live executing row if — and only if — `owner` still owns it. */
     private take;

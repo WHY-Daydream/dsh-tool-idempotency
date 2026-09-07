@@ -23,6 +23,7 @@ import type { ToolExecution } from '@deepseek-ai/dsh-tools';
 export declare function sortJsonValue(value: unknown): unknown;
 /**
  * Request fingerprint: hash of tool name + canonicalized arguments.
- * SHA-256 + 规范化版本字节；碰撞概率可忽略，不同请求不得错误合并（0.2.0 契约）。
+ * SHA-256 + 规范化版本字节；**修复已知 FNV 碰撞对**，碰撞概率大幅降低
+ * （非绝对免碰撞；0.2.0 契约以实测碰撞对回归为准）。
  */
 export declare function fingerprintOf(exec: ToolExecution): string;

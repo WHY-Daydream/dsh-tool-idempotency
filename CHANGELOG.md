@@ -19,6 +19,10 @@
 - **failed_safe**：工具/包装器返回带证据码 `IDEMPOTENCY_NOT_COMMITTED`
   （`error.info.code`）的错误结果时，视为「确定未提交」，释放锁且不留记录，重试允许
   重新执行。**无证据时不得凭错误码猜测提交状态**。
+- 新增配置 **`maxUnknown`（默认 1024）**：unknown 墓碑的独立容量预算（墓碑永不淘汰，
+  但内存有界）。预算耗尽时**新受保护执行被前置拒绝**（`IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED`，
+  不淘汰旧墓碑、不让副作用在没有「失败后可记录位置」的情况下执行），对账
+  `release`/`confirm` 后恢复。
 - **Saga 缓存失效（K2 修复方向）**：新增 `ctx.get('toolIdempotency')` 接口——
   `query` / `release` / `confirm` / `invalidate`。
   - `invalidate(key)`：清除 succeeded 缓存并递增**代次**；旧 owner 晚到结算（owner+代次
@@ -34,7 +38,8 @@
 - K2（Saga 补偿后一致性）：补偿流程可 `invalidate` 使原操作成功缓存失效，且代次机制
   防止旧执行写回陈旧结果。
 - **O1（指纹碰撞）**：请求指纹 FNV-1a 32 位 → **SHA-256**（+ 规范化版本字节 `v1:`）；
-  0.1.3 实测碰撞对不同请求不再被错误合并重放（`argument-equality.spec.ts` 回归实证）。
+  **修复 0.1.3 实测碰撞对**（`12077584`），回归实证见 `argument-equality.spec.ts`；
+  碰撞概率大幅降低，但不作绝对免碰撞保证。
 - **unknown 墓碑豁免容量淘汰**：`maxEntries` 只约束 succeeded 缓存，unknown 墓碑永不
   淘汰——容量压力不再静默解除防重复副作用标记（store/state-machine 补测覆盖）。
 - **failed_safe 证据可来自抛错**：抛 `HarnessError(message, 'IDEMPOTENCY_NOT_COMMITTED')`
