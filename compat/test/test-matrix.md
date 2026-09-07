@@ -381,31 +381,33 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
   （`compat/fixtures/prev-release-0.1.1-rc.2-0.2.0/`，版本校验已注入）。
 - 网络恢复后命令与步骤：`compat/README.md`「0.2.0 候选验收 fixture」。
 
-### 12.6 最新候选独立复验（HEAD `ba99275`，2026-09-07）
+### 12.6 最新候选独立复验（HEAD `9877728`，2026-09-07）
 
 > 口径更正：**旧提交的全绿不能自动覆盖最新候选**。本节为最新候选（含并发预留、
-> 可脱离 join、generations 清理、**3 个 P1 审查修复**提交 `2188880`→`ba99275`）
-> **自己的全套件结果**，与 §10/§12.1 记录的旧提交计数（18/18、69/69、68/68、2/2）
-> 分开记账。
+> 可脱离 join、generations 清理、3 个 P1 审查修复、**fencing token（P1-3a/3b）**
+> 提交 `2188880`→`9877728`）**自己的全套件结果**，与 §10/§12.1 记录的旧提交计数
+> （18/18、69/69、68/68、2/2）分开记账。
 
-| 套件 | 最新候选（HEAD `ba99275`）结果 |
+| 套件 | 最新候选（HEAD `9877728`）结果 |
 | --- | --- |
 | typecheck:tests / typecheck / build | PASS（exit 0） |
 | p0（tests/p0） | 2 文件 **26/26** |
 | unit | 4 文件 **77/77** |
-| correctness | 13 文件 **85/85**（含 p1-review-regressions.spec.ts 8 用例） |
+| correctness | 13 文件 **89/89**（含 p1-review-regressions.spec.ts 12 用例） |
 | e2e | 1 文件 **2/2** |
-| 合计 | **190 用例全绿，ALL PASS**（`node compat/test/run-all.mjs` exit 0，2026-09-07 实测） |
-| fixture 重装复验 | current-latest-0.2.0：baseline OK / regression 14/14 / structured OK / c3 **PASS=7 FAIL=0** / agent-e2e OK；prev-release-0.1.1-rc.2-0.2.0：baseline OK / regression 14/14（均 `[VERSION] plugin loaded = 0.2.0`，候选 tgz sha256 `8d54f0f0…`） |
+| 合计 | **194 用例全绿，ALL PASS**（`node compat/test/run-all.mjs` exit 0，2026-09-07 实测） |
+| fixture 重装复验 | current-latest-0.2.0：baseline OK / regression 14/14 / structured OK / c3 **PASS=7 FAIL=0** / agent-e2e OK；prev-release-0.1.1-rc.2-0.2.0：baseline OK / regression 14/14（均 `[VERSION] plugin loaded = 0.2.0`，候选 tgz sha256 `d923c8eb…`） |
 
-说明：最新候选新增并发预留、P1 反例等用例（p0/unit/correctness 计数高于旧提交），
-计数不同即分开记录的原因；后续任何新提交都需以此节方式重跑，不能引用本节结果替代。
+说明：最新候选新增并发预留、P1 反例、fencing 回归等用例（p0/unit/correctness 计数
+高于旧提交），计数不同即分开记录的原因；后续任何新提交都需以此节方式重跑，不能引用
+本节结果替代。
 
 ## 13. 实际代码审查 3 个 P1：复现 → 修复 → 回归（2026-09-07，分支 `0.2.0`）
 
 > 负责人基于远端 `1275ba9` 实际代码审查 + 两处宿主线干净安装（npm ci 无 peer 绕过），
-> 发现 3 个 P1 反例。**修复前 0.2.0 暂不应发布**；本节按「复现 → 修复 → 回归」记录，
-> 反例回归文件 `tests/correctness/p1-review-regressions.spec.ts`（8 用例）。
+> 发现 3 个 P1 反例；复核 fencing 后追加 P1-3a/3b（generation ABA 与同源一致性问题，
+> §13.5）。**修复前 0.2.0 暂不应发布**；本节按「复现 → 修复 → 回归」记录，
+> 反例回归文件 `tests/correctness/p1-review-regressions.spec.ts`（12 用例）。
 
 ### 13.1 P1-1 执行中 invalidate 不得丢失未知提交状态
 
@@ -435,25 +437,55 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
   `release(B)`（key=K, amount=999）当前代码直接删除 A 的 unknown（只看 key 不看参数）；
   重试 A → **副作用累计 2 次**。confirm/invalidate 同理可覆盖/清除对方记录。
 - **复现**：pipeline 级三用例（release/confirm/invalidate 冲突）修复前 FAIL。
-- **修复**（`6f40b36`）：
+- **修复**（`6f40b36` + `f6aca7f`）：
   - store 层 `release/invalidate/confirm` 校验已有记录 fingerprint，冲突**拒绝且保持原状态**；
-  - `release` 支持 `expectedGeneration`（异步对账**版本绑定**：query 返回 `generation`，
-    记录被新一轮执行消费后旧对账结果拒绝）；
-  - `ToolIdempotencyApi` 对账方法返回 `{ ok, error? }`，冲突原因明确。
+  - **fencing token**：每轮执行分配 `crypto.randomUUID()` executionId（永不回退、生命周期
+    唯一），对账方法校验 `fingerprint + expectedExecutionId`，与 query 返回**同源**
+    （都读记录本身的 executionId）——旧对账结果（ABA）永远无法作用于新一轮执行
+    （P1-3a/3b 详见 §13.5）；
+  - `ToolIdempotencyApi` 对账方法返回 `{ ok, error? }`（冲突含
+    `IDEMPOTENCY_GENERATION_MISMATCH`），原因明确。
 - **回归**：三用例 PASS（冲突保持原状态 + 正确参数才可解除/覆盖/失效）。
 
 ### 13.4 修复后全量回归
 
 | 项 | 结果 |
 | --- | --- |
-| 反例回归（`p1-review-regressions.spec.ts`） | 复现阶段 **6 FAIL** → 修复后 **8/8 PASS**（2026-09-07 实测） |
-| 全套件（run-all.mjs） | typecheck:tests / p0 26/26 / unit 77/77 / correctness **85/85** / e2e 2/2 → **190 用例 ALL PASS**，exit 0（§12.6） |
-| fixture 重装复验 | current-latest-0.2.0 五脚本全过（c3 PASS=7 FAIL=0）+ prev-release 线 14/14（候选 tgz sha256 `8d54f0f0…`） |
-| 提交/推送 | `6f40b36`（fix）+ `9187061`（test）+ `ba99275`（acceptance）已推送远端 `0.2.0`（`1275ba9..ba99275`） |
+| 反例回归（`p1-review-regressions.spec.ts`） | 复现阶段 **6 FAIL** → 修复后 **12/12 PASS**（含 fencing Case 1-4，2026-09-07 实测） |
+| 全套件（run-all.mjs） | typecheck:tests / p0 26/26 / unit 77/77 / correctness **89/89** / e2e 2/2 → **194 用例 ALL PASS**，exit 0（§12.6） |
+| fixture 重装复验 | current-latest-0.2.0 五脚本全过（c3 PASS=7 FAIL=0）+ prev-release 线 14/14（候选 tgz sha256 `d923c8eb…`） |
+| 提交/推送 | `6f40b36`/`9187061`/`ba99275`（P1 修复轮）+ `f6aca7f`/`012ad00`/`9877728`（fencing 轮）已推送远端 `0.2.0`（`1275ba9..9877728`） |
 | 干净安装（负责人侧） | 两条宿主线新生成锁文件 `npm ci` 成功、无 peer 绕过、各 14/14（§13 引言） |
 
-**发布状态**：3 个 P1 已修复并有反例回归，但 **0.2.0 发布决策仍待负责人**；
-transaction×idempotency 实际组合验收仍 BLOCKED（上游 peer 冲突，手动 invalidate 不替代）。
+**发布状态**：3 个 P1 与 P1-3a/3b（fencing）已修复并有反例回归，但 **0.2.0 发布决策
+仍待负责人复核**（fencing 语义确认后解除 HOLD）；transaction×idempotency 实际组合
+验收仍 BLOCKED（上游 peer 冲突，手动 invalidate 不替代）。
+
+### 13.5 P1-3a/3b fencing token（executionId）——P1-3 关闭前提
+
+> 负责人复核 P1-3 时发现更深一层问题：**generation 因清理被复用（经典 ABA / fencing
+> token 失效）**——`generation 相等 ≠ 一定是同一次执行`；且「query 返回的 generation
+> 与 release 校验的不一致」会造成合法对账被拒（unknown 无法解除，key 长期不可恢复）。
+> 这两点直接击穿 P1-3「旧对账结果不能作用于新执行」的修复目标。
+
+- **ABA 反例（P1-3b 核心）**：执行 A（token=1）→ invalidate/release → 清理 → 执行 B
+  （token 又从 1 开始）→ 网络中迟到的 `release(expectedGeneration=1)` 误判为针对 B
+  → **旧对账结果仍能作用于新执行**。
+- **契约**：`executionId` 是每轮执行分配、**永不回退且在生命周期内唯一**的 fencing
+  token；query 返回与 release/confirm/invalidate 校验**同源**（都读记录本身的
+  executionId）；**删除业务状态 ≠ 删除 fencing 历史**（token 不复用，规避 P1-2 清理
+  与 fencing 的冲突）。
+- **修复**（`f6aca7f`）：reserve 分配 `crypto.randomUUID()` 作为 executionId；对账方法
+  校验 `fingerprint + expectedExecutionId`（记录不存在或 token 不匹配 → 拒绝且保持
+  原状态）；错误码 `IDEMPOTENCY_GENERATION_MISMATCH`；query 返回 `executionId`
+  （替换原 generation）。
+- **回归**（4 用例，全部 PASS）：
+  - Case 1：executionId 不允许复用（两轮执行 token 不同，UUID 永不回退）；
+  - Case 2（P1-3b 核心）：ABA stale `release(expectedExecutionId=g1)` → `ok=false` +
+    `GENERATION_MISMATCH`，新执行仍存在且属于 g2；
+  - Case 3：query → release round trip（中间无状态变化必须成功，同源一致）；
+  - Case 4：stale confirm/release/invalidate 全部拒绝（fencing 一致覆盖三个对账方法），
+    新执行状态保持。
 
 
 
