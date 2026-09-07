@@ -52,6 +52,12 @@ export declare class MemoryStore {
     private readonly cache;
     private readonly unknown;
     private readonly generations;
+    /**
+     * 「失效态」key 集合：invalidate（补偿流程）标记，release/confirm（对账解除）移除。
+     * 用于区分缓存失效与对账解除——仅失效时，旧执行晚到的**失败（无提交证据）结果
+     * 必须保留 unknown**（工具可能已提交副作用但响应丢失），解除时不重新上锁。
+     */
+    private readonly invalidatedKeys;
     private readonly maxEntries;
     private readonly maxInFlight;
     private readonly maxUnknown;
@@ -81,18 +87,33 @@ export declare class MemoryStore {
     /**
      * Settle an execution. Success → succeeded 缓存；带 NOT_COMMITTED 证据的错误 →
      * failed_safe（释放即可，重试允许）；其余错误 → unknown 墓碑（重试被阻止）。
-     * 代次不匹配（失效通知与旧执行并发）→ 释放但不写任何记录。
+     * 代次不匹配（失效/解除与旧执行并发）：
+     * - invalidate 态：**禁止旧成功结果写回 ≠ 可以遗忘未知提交状态**——旧执行失败
+     *   （无提交证据）必须写 unknown 阻止重试（工具可能已提交副作用但响应丢失）；
+     *   旧成功结果不写回（已被失效/补偿）。
+     * - release/confirm 态（真解除）：不写任何记录（旧执行晚到不得重新上锁）。
+     * 所有退出路径都清理 generations/invalidatedKeys（防无界增长）。
      */
     settle(key: string, owner: number, result: ToolExecutionResult, ttlMs: number): void;
-    /** Thrown failure → unknown 墓碑（无提交证据），代次不匹配则不写。
-     *  抛错携带 NOT_COMMITTED 证据码时视为 failed_safe（确定未提交，不留记录）。 */
+    /** Thrown failure → unknown 墓碑（无提交证据），代次不匹配时区分失效/解除态；
+     *  抛错携带 NOT_COMMITTED 证据码时视为 failed_safe（确定未提交，不留记录）。
+     *  所有退出路径都清理 generations/invalidatedKeys。 */
     fail(key: string, owner: number, error: unknown): void;
-    /** 仅清除 succeeded 缓存 + 递增代次（补偿流程用；unknown 由 release/confirm 处理）。 */
-    invalidate(key: string): void;
-    /** 状态解除：递增代次并清除 succeeded 与 unknown（下游对账后，后续同 key 重新执行）。 */
-    release(key: string): void;
-    /** 下游确认已提交：写入验证过的 succeeded 结果（可重放），并递增代次防旧写回。 */
-    confirm(key: string, fingerprint: string, result: ToolExecutionResult, ttlMs: number): void;
+    /** 已有记录的 fingerprint 校验：记录存在且 fingerprint 不匹配 → 拒绝（保持原状态）。 */
+    private fingerprintMatches;
+    /** 仅清除 succeeded 缓存 + 递增代次 + 标记失效态（补偿流程用；unknown 由
+     *  release/confirm 处理）。**校验 fingerprint**：已有记录属于不同参数（另一请求）
+     *  时拒绝且保持原状态。失效态下旧执行晚到的失败必须保留 unknown（见 settle/fail）。 */
+    invalidate(key: string, fingerprint?: string): boolean;
+    /** 状态解除：递增代次并清除 succeeded 与 unknown，移除失效标记（下游对账后，
+     *  后续同 key 重新执行；旧执行晚到不得重新上锁）。**校验 fingerprint 与可选代次**
+     * （异步对账版本绑定）：已有记录属于不同参数 → 拒绝；expectedGeneration 与当前
+     *  代次不一致（记录已被新一轮执行消费）→ 拒绝，避免旧对账结果作用于新一轮执行。 */
+    release(key: string, fingerprint?: string, expectedGeneration?: number): boolean;
+    /** 下游确认已提交：写入验证过的 succeeded 结果（可重放），并递增代次防旧写回、
+     *  移除失效标记（视为对账解除）。**校验 fingerprint**：已有记录属于不同参数 →
+     *  拒绝且保持原状态。 */
+    confirm(key: string, fingerprint: string, result: ToolExecutionResult, ttlMs: number): boolean;
     /** Drop a cached succeeded result (inFlightOnly forced re-execution). */
     delete(key: string): void;
     /** Total live records (executing locks + cache + unknown). */

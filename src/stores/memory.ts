@@ -98,6 +98,12 @@ export class MemoryStore {
   private readonly cache = new Map<string, SucceededEntry>()
   private readonly unknown = new Map<string, UnknownEntry>()
   private readonly generations = new Map<string, number>()
+  /**
+   * 「失效态」key 集合：invalidate（补偿流程）标记，release/confirm（对账解除）移除。
+   * 用于区分缓存失效与对账解除——仅失效时，旧执行晚到的**失败（无提交证据）结果
+   * 必须保留 unknown**（工具可能已提交副作用但响应丢失），解除时不重新上锁。
+   */
+  private readonly invalidatedKeys = new Set<string>()
   private readonly maxEntries: number
   private readonly maxInFlight: number
   private readonly maxUnknown: number
@@ -224,7 +230,12 @@ export class MemoryStore {
   /**
    * Settle an execution. Success → succeeded 缓存；带 NOT_COMMITTED 证据的错误 →
    * failed_safe（释放即可，重试允许）；其余错误 → unknown 墓碑（重试被阻止）。
-   * 代次不匹配（失效通知与旧执行并发）→ 释放但不写任何记录。
+   * 代次不匹配（失效/解除与旧执行并发）：
+   * - invalidate 态：**禁止旧成功结果写回 ≠ 可以遗忘未知提交状态**——旧执行失败
+   *   （无提交证据）必须写 unknown 阻止重试（工具可能已提交副作用但响应丢失）；
+   *   旧成功结果不写回（已被失效/补偿）。
+   * - release/confirm 态（真解除）：不写任何记录（旧执行晚到不得重新上锁）。
+   * 所有退出路径都清理 generations/invalidatedKeys（防无界增长）。
    */
   settle(key: string, owner: number, result: ToolExecutionResult, ttlMs: number): void {
     const live = this.take(key, owner)
@@ -232,7 +243,12 @@ export class MemoryStore {
     live.resolve(result)
     this.drainWaiters(live, { kind: 'resolve', result })
     if (live.generation !== this.generationOf(key)) {
-      // 过期代次：不得把旧执行结果写回已失效/已解除的状态
+      if (this.invalidatedKeys.has(key) && result.isError && result.error?.info?.code !== NOT_COMMITTED_CODE) {
+        // 失效态 + 失败无提交证据：保留 unknown（阻止重试），不可静默遗忘
+        this.writeUnknown(key, live.fingerprint)
+      }
+      this.generations.delete(key)
+      this.invalidatedKeys.delete(key)
       return
     }
     if (!result.isError) {
@@ -243,46 +259,88 @@ export class MemoryStore {
     } else {
       this.writeUnknown(key, live.fingerprint)
     }
-    // 代次条目只在「可能还有陈旧 owner 未结算」时需要；本执行已 take（同 key 不可能
-    // 再有并发执行），代次检查已用毕 → 删除，避免 generations 随 key 数无限增长。
     this.generations.delete(key)
+    this.invalidatedKeys.delete(key)
   }
 
-  /** Thrown failure → unknown 墓碑（无提交证据），代次不匹配则不写。
-   *  抛错携带 NOT_COMMITTED 证据码时视为 failed_safe（确定未提交，不留记录）。 */
+  /** Thrown failure → unknown 墓碑（无提交证据），代次不匹配时区分失效/解除态；
+   *  抛错携带 NOT_COMMITTED 证据码时视为 failed_safe（确定未提交，不留记录）。
+   *  所有退出路径都清理 generations/invalidatedKeys。 */
   fail(key: string, owner: number, error: unknown): void {
     const live = this.take(key, owner)
     if (live === undefined) return
     live.reject(error)
     this.drainWaiters(live, { kind: 'reject', error })
-    if (hasNotCommittedEvidence(error)) return // failed_safe：有证据确定未提交
-    if (live.generation !== this.generationOf(key)) return
+    if (hasNotCommittedEvidence(error)) {
+      // failed_safe：有证据确定未提交 → 无记录，重试重新执行
+      this.generations.delete(key)
+      this.invalidatedKeys.delete(key)
+      return
+    }
+    if (live.generation !== this.generationOf(key)) {
+      if (this.invalidatedKeys.has(key)) {
+        // 失效态 + 失败无提交证据：保留 unknown（阻止重试），不可静默遗忘
+        this.writeUnknown(key, live.fingerprint)
+      }
+      this.generations.delete(key)
+      this.invalidatedKeys.delete(key)
+      return
+    }
     this.writeUnknown(key, live.fingerprint)
     this.generations.delete(key)
+    this.invalidatedKeys.delete(key)
   }
 
-  /** 仅清除 succeeded 缓存 + 递增代次（补偿流程用；unknown 由 release/confirm 处理）。 */
-  invalidate(key: string): void {
+  /** 已有记录的 fingerprint 校验：记录存在且 fingerprint 不匹配 → 拒绝（保持原状态）。 */
+  private fingerprintMatches(key: string, fingerprint: string | undefined): boolean {
+    if (fingerprint === undefined) return true // 未提供指纹时不校验（兼容旧调用）
+    const record = this.get(key)
+    if (record === undefined) return true // 无记录：幂等（无可误伤对象）
+    return record.fingerprint === fingerprint
+  }
+
+  /** 仅清除 succeeded 缓存 + 递增代次 + 标记失效态（补偿流程用；unknown 由
+   *  release/confirm 处理）。**校验 fingerprint**：已有记录属于不同参数（另一请求）
+   *  时拒绝且保持原状态。失效态下旧执行晚到的失败必须保留 unknown（见 settle/fail）。 */
+  invalidate(key: string, fingerprint?: string): boolean {
+    if (!this.fingerprintMatches(key, fingerprint)) return false
     this.generations.set(key, this.generationOf(key) + 1)
     this.cache.delete(key)
-    // 无在途执行时没有「陈旧 owner 晚到」风险，代次条目立即释放（防 generations 无限增长）
-    if (!this.executing.has(key)) this.generations.delete(key)
+    this.invalidatedKeys.add(key)
+    // 无在途执行时没有「陈旧 owner 晚到」风险，代次条目与失效标记立即释放（防增长）
+    if (!this.executing.has(key)) {
+      this.generations.delete(key)
+      this.invalidatedKeys.delete(key)
+    }
+    return true
   }
 
-  /** 状态解除：递增代次并清除 succeeded 与 unknown（下游对账后，后续同 key 重新执行）。 */
-  release(key: string): void {
+  /** 状态解除：递增代次并清除 succeeded 与 unknown，移除失效标记（下游对账后，
+   *  后续同 key 重新执行；旧执行晚到不得重新上锁）。**校验 fingerprint 与可选代次**
+   * （异步对账版本绑定）：已有记录属于不同参数 → 拒绝；expectedGeneration 与当前
+   *  代次不一致（记录已被新一轮执行消费）→ 拒绝，避免旧对账结果作用于新一轮执行。 */
+  release(key: string, fingerprint?: string, expectedGeneration?: number): boolean {
+    if (!this.fingerprintMatches(key, fingerprint)) return false
+    if (expectedGeneration !== undefined && this.generationOf(key) !== expectedGeneration) return false
     this.generations.set(key, this.generationOf(key) + 1)
     this.cache.delete(key)
     this.unknown.delete(key)
+    this.invalidatedKeys.delete(key)
     if (!this.executing.has(key)) this.generations.delete(key)
+    return true
   }
 
-  /** 下游确认已提交：写入验证过的 succeeded 结果（可重放），并递增代次防旧写回。 */
-  confirm(key: string, fingerprint: string, result: ToolExecutionResult, ttlMs: number): void {
+  /** 下游确认已提交：写入验证过的 succeeded 结果（可重放），并递增代次防旧写回、
+   *  移除失效标记（视为对账解除）。**校验 fingerprint**：已有记录属于不同参数 →
+   *  拒绝且保持原状态。 */
+  confirm(key: string, fingerprint: string, result: ToolExecutionResult, ttlMs: number): boolean {
+    if (!this.fingerprintMatches(key, fingerprint)) return false
     this.generations.set(key, this.generationOf(key) + 1)
     this.unknown.delete(key)
+    this.invalidatedKeys.delete(key)
     this.cacheResult(key, 0, fingerprint, result, ttlMs)
     if (!this.executing.has(key)) this.generations.delete(key)
+    return true
   }
 
   /** Drop a cached succeeded result (inFlightOnly forced re-execution). */
