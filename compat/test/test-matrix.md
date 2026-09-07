@@ -311,7 +311,7 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 | 并发预留口径 | 预算按 **`unknown + 在途执行 ≤ maxUnknown`** 计数（`reserve`/`unknownFull` 同口径）：所有在途请求都可能进 unknown，故在途即预留——杜绝「检查时未满、多个不同 key 并发启动、全部失败后集体突破预算」；**成功结算即释放预留**（succeeded 不占墓碑预算） |
 | 满载行为 | 预算耗尽时**前置拒绝**新受保护执行（新错误码 `IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED` / `IdempotencyUnknownCapacityRejected`）：不淘汰旧墓碑，也不让副作用在没有「失败后可记录位置」的情况下执行；**同 key 历史 unknown 不被绕过**（重试仍 `STATE_UNKNOWN`） |
 | 恢复 | 对账 `release`/`confirm` 释放预算；`invalidate` 不影响墓碑（补偿只管 succeeded 缓存） |
-| 测试 | store 层 +4（预算拒绝/恢复、`maxUnknown` 非正校验、**并发预留口径：maxUnknown=2 时同时在途 ≤2，全部失败后墓碑不突破**、**成功释放预留：一成一败预算正确**）；pipeline 层 +2（前置拒绝→对账→恢复 attempts 断言；**maxUnknown=2 时第 3 个并发新 key 在途预留阶段即被前置拒绝、全部失败后不突破、对账恢复**）；相关套件 69/69 全绿 |
+| 测试 | store 层 +4（预算拒绝/恢复、`maxUnknown` 非正校验、**并发预留口径：maxUnknown=2 时同时在途 ≤2，全部失败后墓碑不突破**、**成功释放预留：一成一败预算正确**）；pipeline 层 +2（前置拒绝→对账→恢复 attempts 断言；**maxUnknown=2 时第 3 个并发新 key 在途预留阶段即被前置拒绝、全部失败后不突破、对账恢复**）；相关套件 69/69 全绿（**旧提交计数，最新候选独立复验见 §12.6**） |
 
 ### 12.2 对账决策核对业务账本（release/confirm 业务证据）
 
@@ -360,10 +360,14 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 | 清理后释放 | owner 完成 + 对账 + 插件卸载（dispose）后 heap 回落（final 11MB，与基线差 ≤15MB 上界内） |
 | 结论 | **ALL PASS**（正确性零失败；内存有界；owner 完成+对账+卸载后资源回落） |
 
-补充说明（实测性质，非缺陷）：
-- **宿主侧 dispatch 记录随在途 owner 保留**：同一长期未完成 owner 每次 join（含已取消）约
-  保留 4.5KB 宿主侧记录，**owner 完成即释放**（清理后回落为证）；插件侧 waiter 已改为
-  「abort 即从集合移除」的可脱离 join，不在 owner promise 上累积 `.then` 处理器。
+补充说明（**整体使用限制**，非插件缺陷但使用方必须遵守）：
+- **宿主侧 dispatch 记录随在途 owner 保留（整体使用限制）**：同一长期未完成 owner 每次
+  join（含已取消）约保留 4.5KB 宿主侧记录，**owner 完成才释放**（清理后回落为证）；
+  插件侧 waiter 已改为「abort 即从集合移除」的可脱离 join，不在 owner promise 上累积
+  `.then` 处理器。**本验证为指定负载下通过**（3600s，`LONG_TOTAL_JOIN_CAP=5000`，
+  join 达 5000 次后停止）——**不构成「无限持续 join/cancel 也有界」的证明**；使用方
+  必须以 owner 完成/超时策略 + 控制并发 join 量来约束宿主侧保留，长期不决的 owner
+  会持续占用对应内存。
 - **代次条目用毕即删**：`generations` 仅在「可能有陈旧 owner 未结算」期间驻留，小时级
   运行 32 万次 release/confirm 后无累积（`growth=6MB` 即含该验证）。
 - 未观察项：跨重启边界（单进程语义）；精确逐对象泄漏判定需堆快照 diff，本轮以
@@ -376,6 +380,25 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 - 上一发布线（0.1.1-rc.2）**0.2.0 候选包**归档运行：baseline OK、regression 14/14
   （`compat/fixtures/prev-release-0.1.1-rc.2-0.2.0/`，版本校验已注入）。
 - 网络恢复后命令与步骤：`compat/README.md`「0.2.0 候选验收 fixture」。
+
+### 12.6 最新候选独立复验（HEAD `1275ba9`，2026-09-07）
+
+> 口径更正：**旧提交的全绿不能自动覆盖最新候选**。本节为最新候选（含并发预留、
+> 可脱离 join、generations 清理提交 `2188880`→`1275ba9`）**自己的全套件结果**，
+> 与 §10/§12.1 记录的旧提交计数（18/18、69/69、68/68、2/2）分开记账。
+
+| 套件 | 最新候选（HEAD `1275ba9`）结果 |
+| --- | --- |
+| typecheck:tests / typecheck / build | PASS（exit 0） |
+| p0（tests/p0） | 2 文件 **26/26** |
+| unit | 4 文件 **77/77** |
+| correctness | 12 文件 **77/77** |
+| e2e | 1 文件 **2/2** |
+| 合计 | **182 用例全绿，ALL PASS**（`node compat/test/run-all.mjs` exit 0，2026-09-07 实测） |
+| fixture 重装复验 | current-latest-0.2.0：baseline OK / regression 14/14 / structured OK / c3 **PASS=7 FAIL=0** / agent-e2e OK；prev-release-0.1.1-rc.2-0.2.0：baseline OK / regression 14/14（均 `[VERSION] plugin loaded = 0.2.0`，候选 tgz sha256 `9f66d6a7…`） |
+
+说明：最新候选新增并发预留等用例（p0/unit/correctness 计数高于旧提交），计数不同
+即分开记录的原因；后续任何新提交都需以此节方式重跑，不能引用本节结果替代。
 
 
 
