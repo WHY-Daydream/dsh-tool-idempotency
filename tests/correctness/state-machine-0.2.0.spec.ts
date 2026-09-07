@@ -256,6 +256,41 @@ describe('0.2.0 unknown 五要点补测：确认未提交后才允许重新执�
     expect(idempotencyApi(ctx).query('create_order', { orderId: 'k2' })?.state).toBe('unknown') // 历史墓碑仍在
   })
 
+  it('并发预留（pipeline）：maxUnknown=2，2 个在途持有预留时第 3 个新 key 被前置拒绝；全部失败后墓碑不突破预算', async () => {
+    let attempts = 0
+    const gate = deferred<ContentBlock[]>()
+    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }], maxUnknown: 2 })
+    registerTool(ctx, 'create_order', async () => {
+      attempts += 1
+      await gate.promise // 保持 in-flight（预留持有中，模拟并发窗口）
+      throw new Error('boom')
+    })
+    const p1 = executeTool(ctx, 'create_order', { orderId: 'k1' })
+    await until(() => attempts === 1) // k1 已持有预留
+    const p2 = executeTool(ctx, 'create_order', { orderId: 'k2' })
+    await until(() => attempts === 2) // k2 已持有预留
+
+    // 第 3 个：unknown=0 + executing=2 >= maxUnknown=2 → 前置拒绝（预留计数，副作用不执行）
+    const r3 = await executeTool(ctx, 'create_order', { orderId: 'k3' })
+    expect(r3).toMatchObject({ isError: true, error: { info: { code: 'IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED' } } })
+    expect(attempts).toBe(2) // k3 未执行副作用
+
+    // 全部失败 → unknown=2 == maxUnknown，不突破预算
+    gate.reject(new Error('boom'))
+    await Promise.allSettled([p1, p2])
+    expect(idempotencyApi(ctx).query('create_order', { orderId: 'k1' })?.state).toBe('unknown')
+    expect(idempotencyApi(ctx).query('create_order', { orderId: 'k2' })?.state).toBe('unknown')
+    expect(idempotencyApi(ctx).query('create_order', { orderId: 'k3' })).toBeUndefined()
+
+    // 对账 release 一个 → 恢复：新 key 可执行（失败后仍有位置记录 unknown，不突破）
+    idempotencyApi(ctx).release('create_order', { orderId: 'k1' })
+    const r4 = await executeTool(ctx, 'create_order', { orderId: 'k3' })
+    expect(r4).toMatchObject({ isError: true }) // 工具仍抛错 → unknown
+    expect(attempts).toBe(3)
+    expect(idempotencyApi(ctx).query('create_order', { orderId: 'k3' })?.state).toBe('unknown')
+    expect(idempotencyApi(ctx).query('create_order', { orderId: 'k2' })?.state).toBe('unknown') // 历史墓碑仍在
+  })
+
   it('陈旧 owner 晚到抛错不写回 unknown（release 解除后旧执行失败不重新上锁）', async () => {
     let attempts = 0
     const gate = deferred<ContentBlock[]>()

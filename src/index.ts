@@ -54,11 +54,12 @@ export interface Config {
   maxEntries?: number
   /**
    * Unknown-tombstone budget (default 1024). Tombstones are **never evicted**
-   * (eviction would silently re-open the duplicate-side-effect window); when
-   * the budget is exhausted, new guarded executions are refused up front with
-   * `IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED` — no side effect runs without a
-   * guaranteed place to record an ambiguous failure. Reconcile unknown keys
-   * (`release`/`confirm`) to free budget.
+   * (eviction would silently re-open the duplicate-side-effect window); the
+   * budget counts **concurrency-reserved** capacity — `unknown + in-flight ≤
+   * maxUnknown` — so a burst of concurrent calls that all fail can never
+   * exceed the cap. When the budget is exhausted, new guarded executions are
+   * refused up front with `IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED`; reconcile
+   * unknown keys (`release`/`confirm`) to free budget.
    */
   maxUnknown?: number
   /**
@@ -132,52 +133,6 @@ function idempotencyError(message: string, code: string, errorName: string): Too
     content: [{ type: 'text', text: `Error: ${message}` }],
     error: { message, info: { name: errorName, code } },
   }
-}
-
-/** Rejection carried by a joiner that leaves early because its own signal aborted. */
-class JoinerAbortedError extends Error {
-  constructor() {
-    super('idempotency join aborted by caller signal')
-    this.name = 'JoinerAbortedError'
-  }
-}
-
-/**
- * Join an in-flight execution, but leave promptly when the joiner's own signal
- * aborts — without cancelling the owner or touching the store (settlement stays
- * owner-scoped).
- */
-function joinExecution(
-  ownerPromise: Promise<ToolExecutionResult>,
-  signal: AbortSignal | undefined,
-): Promise<ToolExecutionResult> {
-  if (signal === undefined || signal.aborted) {
-    return Promise.reject(new JoinerAbortedError())
-  }
-  return new Promise<ToolExecutionResult>((resolve, reject) => {
-    let settled = false
-    const onAbort = (): void => {
-      if (settled) return
-      settled = true
-      signal.removeEventListener('abort', onAbort)
-      reject(new JoinerAbortedError())
-    }
-    signal.addEventListener('abort', onAbort, { once: true })
-    ownerPromise.then(
-      (result) => {
-        if (settled) return
-        settled = true
-        signal.removeEventListener('abort', onAbort)
-        resolve(result)
-      },
-      (error: unknown) => {
-        if (settled) return
-        settled = true
-        signal.removeEventListener('abort', onAbort)
-        reject(error)
-      },
-    )
-  })
 }
 
 /** A rule compiled for matching. */
@@ -273,7 +228,9 @@ export function apply(ctx: Context, config: Config): void {
           'IdempotencyKeyMismatch',
         )
       }
-      return joinExecution(existing.promise as Promise<ToolExecutionResult>, exec.signal)
+      // 0.2.0：store.join —— abort-aware 且**可脱离**（waiter 集合管理，abort 即移除，
+      // 不在 owner promise 上累积 .then 处理器；owner 结算时批量结算）。
+      return store.join(key, exec.signal)
     }
 
     if (existing !== undefined && existing.state === 'succeeded') {

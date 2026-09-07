@@ -47,11 +47,12 @@ export interface Config {
     maxEntries?: number;
     /**
      * Unknown-tombstone budget (default 1024). Tombstones are **never evicted**
-     * (eviction would silently re-open the duplicate-side-effect window); when
-     * the budget is exhausted, new guarded executions are refused up front with
-     * `IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED` — no side effect runs without a
-     * guaranteed place to record an ambiguous failure. Reconcile unknown keys
-     * (`release`/`confirm`) to free budget.
+     * (eviction would silently re-open the duplicate-side-effect window); the
+     * budget counts **concurrency-reserved** capacity — `unknown + in-flight ≤
+     * maxUnknown` — so a burst of concurrent calls that all fail can never
+     * exceed the cap. When the budget is exhausted, new guarded executions are
+     * refused up front with `IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED`; reconcile
+     * unknown keys (`release`/`confirm`) to free budget.
      */
     maxUnknown?: number;
     /**

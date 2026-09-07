@@ -17,12 +17,17 @@
  * 预算：executing 受 maxInFlight 限制（满则拒绝，不淘汰）；succeeded 受 maxEntries
  * FIFO 限制（只淘汰已完成项，不碰执行锁与 unknown 墓碑）；**unknown 墓碑受独立预算
  * maxUnknown 限制**（默认 1024）：墓碑**永不淘汰**（淘汰=静默解除=延迟重复副作用），
- * 预算耗尽时 reserve 前置拒绝新执行（不淘汰旧墓碑、不让副作用在没有「失败后可记录
- * 位置」的情况下执行），对账（release/confirm）后恢复。
+ * 且按**并发预留口径**计数（unknown + 在途执行 ≤ maxUnknown，杜绝「检查时未满、并发
+ * 全部失败后突破预算」）；预算耗尽时 reserve 前置拒绝新执行（不淘汰旧墓碑、不让副作用
+ * 在没有「失败后可记录位置」的情况下执行），对账（release/confirm）后恢复。
  */
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools';
 /** 工具结果中「确定未提交」的证据码（failed_safe）。 */
 export declare const NOT_COMMITTED_CODE = "IDEMPOTENCY_NOT_COMMITTED";
+/** waiter 被自身 signal 中止时抛出的错误（join 脱离）。 */
+export declare class JoinerAbortedError extends Error {
+    constructor();
+}
 /** One key's lifecycle record, as observed through {@link MemoryStore.get}. */
 export interface StoreEntry {
     state: 'executing' | 'succeeded' | 'unknown';
@@ -64,6 +69,16 @@ export declare class MemoryStore {
      */
     reserve(key: string, fingerprint: string): Reservation | null;
     /**
+     * Join an in-flight execution（abort-aware、可脱离）：
+     * - waiter 以集合形式挂在执行条目上，abort 时移除自身 + 移除监听器 → 不在 owner
+     *   promise 上累积 .then 处理器（长期未完成 owner 反复 join/cancel 不累积引用）；
+     * - owner 结算（settle/fail）时对全部 waiter 批量结算；
+     * - 自身 signal 已中止/缺失 → 立即以 JoinerAbortedError 拒绝（不注册）。
+     */
+    join(key: string, signal: AbortSignal | undefined): Promise<ToolExecutionResult>;
+    /** 批量结算执行条目的全部 waiter（移除监听器、清空集合）。 */
+    private drainWaiters;
+    /**
      * Settle an execution. Success → succeeded 缓存；带 NOT_COMMITTED 证据的错误 →
      * failed_safe（释放即可，重试允许）；其余错误 → unknown 墓碑（重试被阻止）。
      * 代次不匹配（失效通知与旧执行并发）→ 释放但不写任何记录。
@@ -82,7 +97,7 @@ export declare class MemoryStore {
     delete(key: string): void;
     /** Total live records (executing locks + cache + unknown). */
     get size(): number;
-    /** unknown 墓碑预算是否耗尽（index.ts 据此前置拒绝，区分于在途容量拒绝）。 */
+    /** unknown 墓碑预算是否耗尽（与 reserve 同口径：unknown + 在途预留 ≤ maxUnknown）。 */
     get unknownFull(): boolean;
     private generationOf;
     /** Detach the live executing row if — and only if — `owner` still owns it. */

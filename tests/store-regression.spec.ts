@@ -308,4 +308,56 @@ describe('MemoryStore 0.2.0 — unknown 墓碑与 failed_safe 证据（store 层
   it('rejects a non-positive maxUnknown', () => {
     expect(() => new MemoryStore(1, 1, 0)).toThrow(/maxUnknown/)
   })
+
+  it('并发预留口径：maxUnknown=2 时同时在途（可能进 unknown）≤2，全部失败后墓碑不突破预算', () => {
+    const store = new MemoryStore(10, 10, 2) // maxUnknown=2
+    const a = store.reserve('A', 'fp-a')
+    const b = store.reserve('B', 'fp-b')
+    expect(a).not.toBeNull()
+    expect(b).not.toBeNull()
+    // 第 3 个：unknown=0 + executing=2 >= maxUnknown=2 → 前置拒绝（预留计数，
+    // 而非等失败后才「发现没有位置」）
+    expect(store.reserve('C', 'fp-c')).toBeNull()
+    expect(store.unknownFull).toBe(true) // 与 reserve 同口径
+
+    // 并发全部失败 → unknown=2 == maxUnknown，不突破
+    store.fail('A', a!.owner, new Error('x'))
+    store.fail('B', b!.owner, new Error('x'))
+    expect(store.get('A')?.state).toBe('unknown')
+    expect(store.get('B')?.state).toBe('unknown')
+    expect(store.size).toBe(2)
+
+    // 对账 release 一个 → 恢复；再失败仍不突破
+    store.release('A')
+    expect(store.unknownFull).toBe(false)
+    const c = store.reserve('C', 'fp-c')
+    expect(c).not.toBeNull()
+    store.fail('C', c!.owner, new Error('x'))
+    expect(store.get('C')?.state).toBe('unknown')
+    expect(store.get('B')?.state).toBe('unknown') // 历史墓碑不被绕过
+    expect(store.size).toBe(2)
+  })
+
+  it('成功释放预留：一个成功一个失败 → 成功不占墓碑预算（succeeded≠unknown），预算正确', () => {
+    const store = new MemoryStore(10, 10, 2)
+    const a = store.reserve('A', 'fp-a')
+    const b = store.reserve('B', 'fp-b')
+    store.settle('A', a!.owner, okResult(1), 1000) // 成功 → succeeded（不占墓碑预算）
+    store.fail('B', b!.owner, new Error('x')) // 失败 → unknown=1
+    expect(store.get('A')?.state).toBe('succeeded')
+    expect(store.get('B')?.state).toBe('unknown')
+
+    // unknown=1 + executing=0 < 2 → 新 key 可执行；若失败则 unknown=2，仍不突破
+    const c = store.reserve('C', 'fp-c')
+    expect(c).not.toBeNull()
+    store.fail('C', c!.owner, new Error('x'))
+    expect(store.get('C')?.state).toBe('unknown')
+    expect(store.get('A')?.state).toBe('succeeded') // 成功结果仍在
+
+    // 现在 unknown=2 == maxUnknown → 第 4 个被前置拒绝
+    expect(store.reserve('D', 'fp-d')).toBeNull()
+    store.release('B')
+    const d = store.reserve('D', 'fp-d')
+    expect(d).not.toBeNull()
+  })
 })
