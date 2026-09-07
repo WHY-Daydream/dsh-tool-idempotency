@@ -51,6 +51,9 @@ importers:
       '@why-daydream/dsh-chaos':
         specifier: link:../dsh-chaos
         version: link:../dsh-chaos
+      '@why-daydream/dsh-tool-bulkhead':
+        specifier: link:../dsh-tool-bulkhead
+        version: link:../dsh-tool-bulkhead
       '@why-daydream/dsh-tool-transaction':
         specifier: link:../dsh-tool-transaction
         version: link:../dsh-tool-transaction

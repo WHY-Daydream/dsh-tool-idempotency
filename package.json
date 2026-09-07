@@ -69,6 +69,7 @@
     "@deepseek-ai/dsh-tool-call-timeout-policy": "link:../deepseek-harness/packages/guard/timeout-policy",
     "@deepseek-ai/dsh-tools": "link:../deepseek-harness/packages/core/tools",
     "@why-daydream/dsh-chaos": "link:../dsh-chaos",
+    "@why-daydream/dsh-tool-bulkhead": "link:../dsh-tool-bulkhead",
     "@why-daydream/dsh-tool-transaction": "link:../dsh-tool-transaction",
     "@deepseek-ai/schemastery": "^3.18.1",
     "@types/node": "^22.0.0",

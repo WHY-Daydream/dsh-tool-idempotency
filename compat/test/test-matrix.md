@@ -26,8 +26,9 @@
 | --- | --- | --- |
 | 历史基线 0.1.0-rc.8 组合 | NOT_RUN（本阶段） | 需 fixture 化重跑（2026-09-05 历史安装 PASS 仅作参考，不转写） |
 | DSH 主干前瞻（上游 main d347e703，0.1.3-alpha.1 源码构建） | BLOCKED | 需隔离 checkout + 官方构建（重）；semver union 已覆盖 ≠ 运行时证据 |
-| transaction 组合轨道（chaos/transaction） | BLOCKED-upstream | `@why-daydream/dsh-tool-transaction@0.1.0` 裸地板 peer → strict install ERESOLVE（上游 F1 缺陷类）；本地 dev 宿主 Scenario B PASS |
-| chaos 驱动的 Agent E2E 重试场景 | BLOCKED（上游约束） | registry 闭包 agent-e2e 基础场景已 PASS；chaos 注入重试仍受上游版本约束 |
+| transaction 组合轨道（chaos/transaction） | BLOCKED-upstream（已实证） | 严格安装 ERESOLVE 实测：transaction@0.1.0 的 peer `dsh-invariants >=0.0.1-rc.1`（0.0.1 元组）不匹配 0.1.2-rc.1 预发布（元组 0.1.2）→ npm 拒绝解析；本地 dev 宿主 Scenario B（e2e.spec.ts）PASS |
+| chaos 驱动的 Agent E2E 重试场景 | PASS（基础场景）/ BLOCKED（chaos 重试注入） | registry 闭包 agent-e2e 基础场景 PASS；chaos 注入重试仍受上游版本约束；本地宿主 e2e Scenario A/B 覆盖 chaos+idempotency |
+| 非支持版本运行时负例 | NOT_RUN（无已发布 0.2.x） | semver 层已由 peer-range 28 断言覆盖；0.2.x 未发布，无运行时负例可构造 |
 | 暴露 npm token 撤销（id 16ee9e） | 收尾项（负责人官网操作） | CLI 撤销 403（2FA/策略限制），不走测试流程 |
 
 ## 3. 已知缺陷（FAIL 复现成功，业务正确性=FAIL，0.1.3 接受并声明）
@@ -91,4 +92,36 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 | O6 explicit key 跨工具 | 同 keyArg 值跨工具 → fail-loud `IDEMPOTENCY_KEY_MISMATCH`（无串用、无静默合并） | PASS（安全隔离）；设计观察：explicit key 未按工具命名空间隔离，跨工具同值被拒绝而非各自执行 |
 | O7 插件导出 | 导出面 = `Config/apply/name`，**无 invalidate/clear 接口** | 0.1.3 外部无法主动失效缓存 → 0.2.0 invalidate/代次前置事实 |
 | O8 执行锁与缓存隔离 | TTL 过期不影响执行锁（owner 挂起超 TTL 仍 join）；maxEntries 压力不淘汰执行锁；maxInFlight 拒绝新 key、同 key 仍 join | PASS（P0 语义在本套件全量复验） |
+
+## 7. Phase 3 宿主矩阵补跑与组合测试（2026-09-07）
+
+### 7.1 宿主兼容矩阵（npm 版本线重放，fixture npm ci 精确重放）
+
+| 目标 | 结果 | 证据 |
+| --- | --- | --- |
+| registry 0.1.2-rc.1 线（cordis 4.0.2 + dsh-* 0.1.2-rc.1） | **PASS** | current-latest fixture 重放：baseline OK、regression 14/14、c3（K1/K2 复现保留）、agent-e2e（executions=1）、structured OK |
+| registry 0.1.1-rc.2 线（cordis 4.0.2 + dsh-* 0.1.1-rc.2） | **PASS** | prev-release fixture 重放：baseline OK、regression 14/14（注：脚本输出标签误印 0.1.2-rc.1，package-lock 实测为 0.1.1-rc.2） |
+| 执行时最新 npm DSH 线 | **PASS**（= 0.1.2-rc.1 线） | npm view 实测：cordis latest=4.0.2；dsh-tools/invariants/llm/session 最新发布为 0.1.2-rc.1（latest 标签指向更旧的 0.0.1-rc.1）；dsh-agent-loop latest=0.1.0-rc.6 |
+| DSH 主干源码（d347e703, 0.1.3-alpha.1） | **BLOCKED** | 需隔离 checkout + 官方构建（重）；semver union 已覆盖 ≠ 运行时证据 |
+| 非支持版本（0.2.x） | **NOT_RUN**（无已发布 0.2.x） | semver 层 peer-range 28 断言 PASS；运行时负例不可构造 |
+
+### 7.2 组合测试（本地 link 宿主，tests/correctness/combo-*.spec.ts）
+
+| 组合 | 结果 | 关键断言/观察 |
+| --- | --- | --- |
+| timeout + idempotency（timeout 外层） | **PASS**（含观察） | 合作 body：提交前后超时 → 超时错误不缓存、锁释放、重试重新执行（K1 边界：响应丢失无法区分提交与否）；非合作 body → 超时不生效、调用挂起（组合契约限制：timeout 是合作式预算，需下游转发 signal） |
+| timeout + idempotency（idempotency 外层） | **PASS** | owner 超时：joiner 先 join（attempts=1）共享失败；锁释放后重试重新执行 |
+| bulkhead + idempotency（bulkhead 外层） | **PASS**（含组合观察） | 同 key 重试进入 bulkhead 队列而非 idempotency join（join 仅在 bulkhead 准入后可达）；队列满拒新 key（BULKHEAD_REJECTED）；槽位释放后 a2 经 idempotency 重放、新 key 执行 |
+| bulkhead + idempotency（idempotency 外层） | **PASS** | 同 key 先 join（不进入 bulkhead 队列）；新 key 受 bulkhead 约束（排队/拒绝）；恢复语义正确 |
+| transaction + idempotency | **BLOCKED-upstream** | 严格安装 ERESOLVE 实证（见 §2）；本地 dev 宿主 e2e Scenario B（chaos 补偿 Saga）PASS |
+| 权限 + idempotency | **PASS** | Phase 2 permission-change.spec.ts：缓存命中不绕过 pre-execute/ToolGuard 权限检查 |
+
+### 7.3 Phase 3 新增观测
+
+| 观测 | 结论 |
+| --- | --- |
+| C1 bulkhead 配置契约 | `maxQueue` 必须 ≥1（0 非法）；rule 必须二选一声明 `tool` 或 `domain+tools`；`rejectWhenFull=false` 时队列满的新调用**等待**（至 queueTimeout）而非拒绝 |
+| C2 组合注册顺序语义 | 两者同为 `tools/execute` 包装，先注册者在外层：bulkhead 外层 → 同 key 先排队后 join；idempotency 外层 → 同 key 直接 join。组合行为由注册顺序决定，需在部署文档中声明 |
+| C3 timeout 合作式契约 | 非合作下游（不转发 exec.signal abort）下 timeout 不生效、调用挂起且执行锁被永久占用——工具必须声明并转发 signal（timeoutMs 声明的语义承诺） |
+
 
