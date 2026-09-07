@@ -140,5 +140,38 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 内存无数量级积累。阈值按本机实测记录，未预先承诺毫秒数；精确泄漏检测
 （--expose-gc 采样）记录为局限，宽松上界断言仅用于捕获数量级泄漏。
 
+## 9. Phase 5 · 0.2.0 实现与验证（2026-09-07，分支 `0.2.0`）
+
+### 9.1 实现内容（src 变更）
+
+| 组件 | 变更 |
+| --- | --- |
+| `src/stores/memory.ts` | 四态模型（executing/succeeded/failed_safe 瞬态/unknown 墓碑）；代次号（invalidate/release/confirm 递增，settle/fail 校验，陈旧写回拦截）；`invalidate`/`release`/`confirm`/`query` 支撑方法；unknown 无 TTL 自动解除、FIFO 上限 maxEntries |
+| `src/index.ts` | 失败分类（成功→succeeded；`IDEMPOTENCY_NOT_COMMITTED` 证据→failed_safe；其余→unknown）；unknown 阻止自动重执行（`IDEMPOTENCY_STATE_UNKNOWN`，不随 TTL 解除）；`ctx.provide('toolIdempotency')` 服务（query/release/confirm/invalidate，同名挂载守卫） |
+
+### 9.2 验证结果（完整套件 139/139 全绿，typecheck exit 0）
+
+| 方向 | 结果 | 证据 |
+| --- | --- | --- |
+| 既有 11 个失败语义用例迁移至新契约 | **PASS** | index.spec ×2、store-regression ×2、cancel-abort ×2、replay-fidelity ×2、combo-timeout ×2、lifecycle（provide 同名守卫） |
+| failed_safe（NOT_COMMITTED 证据→重试允许） | **PASS** | state-machine-0.2.0.spec.ts |
+| unknown 阻止重执行 + 不随 TTL 自动解除 | **PASS** | 同上（TTL=1 跨 1.1s 仍 blocked） |
+| inFlightOnly + unknown | **PASS** | 同上 |
+| query 状态转换（executing→succeeded） | **PASS** | 同上 |
+| confirm(key, result) 可重放验证结果 | **PASS** | 同上（result 需完整物化形状 isError/content/value） |
+| invalidate 清除缓存 + 代次防陈旧写回 | **PASS** | 同上（旧 owner 晚到结算不写回缓存） |
+| 并发到达（owner 完成与失效通知先后） | **PASS** | 同上 |
+| e2e Scenario A/B（chaos/transaction 本地宿主） | **PASS** | e2e.spec.ts 2/2（0.2.0 下未破坏） |
+
+### 9.3 0.2.0 状态归位
+
+| 项 | 0.1.3 | 0.2.0 |
+| --- | --- | --- |
+| K1 unknown：响应丢失后重试再次执行（effects=2） | FAIL（已知限制） | **已修复**（重试被阻止 + 对账路径）；上游写操作仍建议业务幂等 key 双重保障 |
+| K2 Saga 补偿后重放旧成功结果 | FAIL（已知限制） | **已修复**（invalidate + 代次 + 新操作身份语义） |
+| 单进程内存边界 | 保留 | 保留（Redis/多进程持久化不做，文档声明） |
+| 其余限制 | 保留 | 保留（跨重启无历史、指纹碰撞 O1、meta/additionalContexts 未覆盖等） |
+
+
 
 

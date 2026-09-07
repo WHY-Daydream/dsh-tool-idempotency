@@ -12,7 +12,7 @@ import { type ContentBlock } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import * as Idempotency from '../src/index.js'
-import type { Config } from '../src/index.js'
+import type { Config, ToolIdempotencyApi } from '../src/index.js'
 
 const testToolSignal = new AbortController().signal
 
@@ -227,8 +227,8 @@ describe('concurrency (in-flight lock)', () => {
   })
 })
 
-describe('failure handling', () => {
-  it('re-executes after the first attempt fails', async () => {
+describe('failure handling (0.2.0: unknown blocks blind retry)', () => {
+  it('无提交证据的失败进入 unknown：重试被阻止（STATE_UNKNOWN）；release 对账后重新执行', async () => {
     let attempts = 0
     const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
     registerTool(ctx, 'create_order', async () => {
@@ -236,10 +236,20 @@ describe('failure handling', () => {
       if (attempts === 1) throw new Error('boom')
       return [{ type: 'text', text: 'order-ok' }]
     })
-    await executeTool(ctx, 'create_order', { orderId: 'a' }).catch(() => undefined)
+    const first = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(first).toMatchObject({ isError: true }) // 抛错（无提交证据）
+
+    // 0.2.0：unknown → 阻止自动重执行（K1 修复：不再盲目重试）
+    const retry = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(retry).toMatchObject({ isError: true, error: { info: { code: 'IDEMPOTENCY_STATE_UNKNOWN' } } })
+    expect(attempts).toBe(1)
+
+    // 下游对账解除后重新执行
+    const api = ctx.get('toolIdempotency') as ToolIdempotencyApi
+    api.release('create_order', { orderId: 'a' })
     const second = await executeTool(ctx, 'create_order', { orderId: 'a' })
-    expect(attempts).toBe(2)
     expect(second).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-ok' }] })
+    expect(attempts).toBe(2)
   })
 })
 
@@ -394,7 +404,7 @@ describe('P0 regression — in-flight capacity is refused, never bypassed', () =
     expect(attempts).toBe(2)
   })
 
-  it('a synchronous downstream throw releases the owner — retry re-executes, no zombie lock', async () => {
+  it('a synchronous downstream throw releases the owner — state becomes unknown; release clears it, no zombie lock', async () => {
     let attempts = 0
     const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
     registerTool(ctx, 'create_order', async () => {
@@ -413,6 +423,14 @@ describe('P0 regression — in-flight capacity is refused, never bypassed', () =
     expect(attempts).toBe(0) // the tool body was never reached
 
     removeThrower()
+    // 0.2.0：同步抛错（无提交证据）→ unknown，重试被阻止（不盲目重执行）
+    const blocked = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(blocked).toMatchObject({ isError: true, error: { info: { code: 'IDEMPOTENCY_STATE_UNKNOWN' } } })
+    expect(attempts).toBe(0)
+
+    // 对账解除后：失败的 claim 已释放锁，重试恰好执行一次
+    const api = ctx.get('toolIdempotency') as ToolIdempotencyApi
+    api.release('create_order', { orderId: 'a' })
     const second = await executeTool(ctx, 'create_order', { orderId: 'a' })
     expect(second).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
     expect(attempts).toBe(1) // the failed claim released the lock; the retry executed exactly once

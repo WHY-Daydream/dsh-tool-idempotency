@@ -3,6 +3,51 @@
 适用范围：`@why-daydream/dsh-tool-idempotency` 自 npm `0.1.1` 升级到 **0.1.3 发布候选**
 （2026-09-07：兼容 patch + 两个 P0 修复 + `maxInFlight`）。
 
+---
+
+## 0.2.0（开发中，分支 `0.2.0`）— unknown 状态机 + Saga 缓存失效
+
+> 状态：实现与专项测试完成，未发布。**含行为变化**（相对 0.1.3）：不再把所有
+> `isError` 解释为「可以重新执行」。CHANGELOG 见 [0.2.0]。
+
+### 1. 失败语义变化（最重要的升级注意）
+
+| 场景 | 0.1.3（旧） | 0.2.0（新） |
+| --- | --- | --- |
+| 工具抛错 / 返回普通错误结果 | 释放锁，重试**自动重新执行**（可能重复副作用 ← K1） | 进入 **unknown**：重试返回 `IDEMPOTENCY_STATE_UNKNOWN`，**阻止自动重执行**，且不随 TTL 自动解除 |
+| 工具/包装器返回带 `error.info.code === 'IDEMPOTENCY_NOT_COMMITTED'` 的错误 | 同普通错误 | **failed_safe**：确定未提交，释放锁且不留记录，重试允许重新执行 |
+| 超时 / abort / 响应丢失 | 重试自动重新执行（effects=2） | unknown：重试被阻止，需对账后 `release`/`confirm` |
+
+**迁移要求**：依赖「失败即重试」的工具必须**显式提供 `IDEMPOTENCY_NOT_COMMITTED` 证据码**
+（返回结构化错误结果，而非抛错/超时），否则重试会被 unknown 阻止；或由下游在重试前
+`query` 状态并 `release`/`confirm`。**无证据时插件不再猜测提交状态。**
+
+### 2. 新接口（`ctx.get('toolIdempotency')`）
+
+| 方法 | 语义 |
+| --- | --- |
+| `query(name, args)` | 查询 key 状态（executing/succeeded/unknown），无记录返回 undefined |
+| `release(name, args)` | 状态解除（下游对账确认无未决提交）：清除 succeeded/unknown，后续同 key 重新执行 |
+| `confirm(name, args, result)` | 下游确认已提交：写入验证过的结果（可重放）。result 需为宿主导管可校验的完整物化形状（isError/content/value） |
+| `invalidate(name, args)` | 补偿流程：清除 succeeded 缓存并递增代次，防止旧执行写回陈旧结果 |
+
+### 3. Saga 补偿流程（K2 方向）
+
+- 补偿成功后：`invalidate(原操作)` 使原成功缓存失效；同 key 重试将**重新执行**（结合业务
+  状态与**新操作身份**决定——仅删除缓存≠可安全重执行）。
+- 补偿自身使用独立且稳定的幂等身份（新 key）。
+- owner+代次校验：`invalidate` 与「原操作完成」并发到达时，旧执行完成不写回缓存。
+- 补偿失败/结果未知：原操作保持 unknown，进入明确的待处理状态，等待对账。
+
+### 4. 范围声明（本版不做）
+
+- 不做 Redis / 多进程持久化；unknown/succeeded 状态仍是**单进程内存语义**。
+- 跨重启边界：进程重启后状态丢失，与 0.1.3 一致（文档已声明）。
+
+---
+
+## 0.1.3 升级说明（原始内容）
+
 > 发布状态：**候选已验收、未发布**（npm `latest=0.1.1`）。验收记录见
 > `compat/acceptance/acceptance-b-2026-09-07.md` / `acceptance-c-2026-09-07.md`；
 > 行为变化与已知限制摘要见 `CHANGELOG.md` [0.1.3]。本版**不是**「无运行时行为变化的

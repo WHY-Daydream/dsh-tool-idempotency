@@ -1,83 +1,76 @@
 /**
- * In-memory idempotency store (MVP, P0-hardened).
+ * In-memory idempotency store (0.2.0: unknown 状态机 + 代次保护).
  *
- * Two budgets keep the duplicate-execution lock independent of the result
- * cache:
- * - `executing` table — one entry per in-flight guarded execution. Entries are
- *   never evicted by cache pressure: evicting an in-flight lock would let a
- *   retry duplicate a side effect (P0). `maxInFlight` bounds this table and a
- *   saturated table refuses new claims instead of running unprotected.
- * - `cache` (succeeded) — replayed within TTL, FIFO-evicted oldest-first when
- *   over `maxEntries`.
+ * 状态模型：
+ * - `executing` — 操作仍在执行；并发重复加入等待（join），执行锁不淘汰。
+ * - `succeeded` — 已确认成功；TTL 内按策略重放（FIFO 上限 maxEntries）。
+ * - `unknown` — 无法确定副作用是否已提交（失败但无「确定未提交」证据）。
+ *   不自动过期、不自动重执行；仅通过显式 release/confirm 解除。FIFO 上限
+ *   maxEntries（淘汰墓碑=丢失状态标记，需下游对账，文档已声明）。
+ * - `failed_safe`（瞬态，不留记录）— 有证据确认未提交（error.info.code ===
+ *   'IDEMPOTENCY_NOT_COMMITTED'）→ 释放锁，重试允许重新执行。
  *
- * Settlements are owner-scoped: only the claim (`owner`) that holds a key may
- * settle or release it, so a stale or late completion can never overwrite or
- * delete a newer record for the same key. In-flight locks are released only by
- * `settle`/`fail`; `delete` drops cached results and never touches a live lock.
- * @module @why-daydream/dsh-tool-idempotency/stores/memory
+ * 代次保护（0.2.0）：每个 key 维护一个代次号。invalidate/release/confirm 递增代次；
+ * settle/fail 校验执行条目代次 === 当前代次，不一致（失效通知与旧执行并发）时
+ * 释放但不写缓存/墓碑——旧执行不能把已失效的结果写回。
+ *
+ * 预算：executing 受 maxInFlight 限制（满则拒绝，不淘汰）；succeeded 与 unknown
+ * 共享 maxEntries FIFO；二者独立于执行锁。
  */
 
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 
+/** 工具结果中「确定未提交」的证据码（failed_safe）。 */
+export const NOT_COMMITTED_CODE = 'IDEMPOTENCY_NOT_COMMITTED'
+
 /** One key's lifecycle record, as observed through {@link MemoryStore.get}. */
 export interface StoreEntry {
-  /** `executing` while the claim is in flight; `succeeded` while cached for replay. */
-  state: 'executing' | 'succeeded'
-  /** Identity of the claim that owns this record (stale settlements are ignored). */
+  state: 'executing' | 'succeeded' | 'unknown'
   owner: number
-  /** Request fingerprint bound to the key (same key + different fingerprint fails loud). */
   fingerprint: string
-  /** Wall-clock creation time (ms), used for FIFO eviction of the cache. */
   createdAt: number
-  /** Absolute expiry (ms); present while `state === 'succeeded'`. */
   expiresAt?: number
-  /** In-flight execution promise; present while `state === 'executing'`. */
   promise?: Promise<ToolExecutionResult>
-  /** Cached normalized result; present while `state === 'succeeded'`. */
   result?: ToolExecutionResult
+  generation: number
 }
 
 /** A successfully reserved in-flight slot. */
 export interface Reservation {
-  /** Owner token to present when settling the reservation. */
   owner: number
-  /** Join promise: settles with the execution's outcome when it settles. */
   promise: Promise<ToolExecutionResult>
 }
 
-/** Executing-row internals (never returned as a mutable handle). */
 interface ExecutingEntry extends StoreEntry {
   state: 'executing'
   promise: Promise<ToolExecutionResult>
-  /** Settle hooks for the join promise (resolved on completion, rejected on throw). */
   resolve: (result: ToolExecutionResult) => void
   reject: (error: unknown) => void
 }
 
-/** Succeeded cache row. */
 interface SucceededEntry extends StoreEntry {
   state: 'succeeded'
   expiresAt: number
   result: ToolExecutionResult
 }
 
+interface UnknownEntry extends StoreEntry {
+  state: 'unknown'
+}
+
 /**
- * Dependency-free store with lazy cache expiry, a FIFO succeeded-cache cap and
- * an independent in-flight cap. `now` is injectable so TTL tests do not sleep.
+ * Dependency-free store. `now` injectable for TTL tests.
  */
 export class MemoryStore {
   private readonly executing = new Map<string, ExecutingEntry>()
   private readonly cache = new Map<string, SucceededEntry>()
+  private readonly unknown = new Map<string, UnknownEntry>()
+  private readonly generations = new Map<string, number>()
   private readonly maxEntries: number
   private readonly maxInFlight: number
   private readonly now: () => number
   private nextOwner = 1
 
-  /**
-   * @param maxEntries - succeeded-result cache cap (FIFO eviction; never affects in-flight locks).
-   * @param maxInFlight - simultaneous in-flight execution cap; overflow is refused, not evicted.
-   * @param now - clock for TTL / FIFO bookkeeping.
-   */
   constructor(maxEntries: number, maxInFlight = 256, now: () => number = Date.now) {
     if (!Number.isInteger(maxEntries) || maxEntries < 1) {
       throw new Error(`dsh-tool-idempotency: invalid maxEntries ${maxEntries} — must be an integer >= 1`)
@@ -91,18 +84,17 @@ export class MemoryStore {
   }
 
   /**
-   * Look up a key. Executing locks are always live (an in-flight task must not
-   * be re-entered by a cache-TTL decision). Succeeded entries past their TTL
-   * are dropped lazily and read as a miss.
-   * @param key - idempotency key.
-   * @returns the live record, or `undefined` for a miss.
+   * Look up a key. executing > unknown > succeeded（succeeded 按 TTL 惰性过期；
+   * unknown 无过期——不自动回到可重执行）。
    */
   get(key: string): StoreEntry | undefined {
     const live = this.executing.get(key)
     if (live !== undefined) return live
+    const unk = this.unknown.get(key)
+    if (unk !== undefined) return unk
     const cached = this.cache.get(key)
     if (cached === undefined) return undefined
-    if (cached.expiresAt !== undefined && this.now() > cached.expiresAt) {
+    if (this.now() > cached.expiresAt) {
       this.cache.delete(key)
       return undefined
     }
@@ -110,15 +102,11 @@ export class MemoryStore {
   }
 
   /**
-   * Reserve an in-flight slot for `key` and register the join promise.
-   * @returns the reservation, or `null` when `maxInFlight` is saturated — the
-   * caller must surface a capacity error and MUST NOT run the side effect.
+   * Reserve an in-flight slot. The entry records the key's current generation;
+   * a later invalidate/release bumps it, so this claim's settle becomes stale.
    */
   reserve(key: string, fingerprint: string): Reservation | null {
     if (this.executing.has(key)) {
-      // Unreachable through the plugin listener (join / mismatch short-circuit
-      // first). Two live claims for one key would fork the side effect, so
-      // fail loud rather than let that happen silently.
       throw new Error(
         `dsh-tool-idempotency: duplicate in-flight claim for key ${JSON.stringify(key)} — join the existing execution instead of claiming again`,
       )
@@ -132,16 +120,13 @@ export class MemoryStore {
     })
     const owner = this.nextOwner
     this.nextOwner += 1
-    // Mark the join promise as handled at the source: when the claiming call
-    // fails with no joiner attached, `fail` rejecting this promise must not
-    // surface as an ambient unhandled rejection. Joiners awaiting the same
-    // promise still receive the rejection normally.
     promise.catch(() => undefined)
     this.executing.set(key, {
       state: 'executing',
       owner,
       fingerprint,
       createdAt: this.now(),
+      generation: this.generationOf(key),
       promise,
       resolve,
       reject,
@@ -150,45 +135,69 @@ export class MemoryStore {
   }
 
   /**
-   * Settle an execution with its result. `isError` results release the lock
-   * without caching (a retry must re-execute); successful results release the
-   * lock and cache for replay. Stale settlements — an owner that no longer
-   * owns the key — are ignored.
-   * @param key - idempotency key.
-   * @param owner - owner token from {@link reserve}.
-   * @param result - the tool result.
-   * @param ttlMs - replay TTL applied to a successful cache write.
+   * Settle an execution. Success → succeeded 缓存；带 NOT_COMMITTED 证据的错误 →
+   * failed_safe（释放即可，重试允许）；其余错误 → unknown 墓碑（重试被阻止）。
+   * 代次不匹配（失效通知与旧执行并发）→ 释放但不写任何记录。
    */
   settle(key: string, owner: number, result: ToolExecutionResult, ttlMs: number): void {
     const live = this.take(key, owner)
     if (live === undefined) return
     live.resolve(result)
-    if (!result.isError) this.cacheResult(key, owner, live.fingerprint, result, ttlMs)
+    if (live.generation !== this.generationOf(key)) {
+      // 过期代次：不得把旧执行结果写回已失效/已解除的状态
+      return
+    }
+    if (!result.isError) {
+      this.cacheResult(key, owner, live.fingerprint, result, ttlMs)
+      this.unknown.delete(key)
+    } else if (result.error?.info?.code === NOT_COMMITTED_CODE) {
+      // failed_safe：有证据确定未提交 → 无记录，重试重新执行
+    } else {
+      this.writeUnknown(key, live.fingerprint)
+    }
   }
 
-  /**
-   * Settle an execution that threw. Releases the lock and rejects the join
-   * promise; stale failures are ignored so an old owner cannot delete a newer
-   * record.
-   */
+  /** Thrown failure → unknown 墓碑（无提交证据），代次不匹配则不写。 */
   fail(key: string, owner: number, error: unknown): void {
     const live = this.take(key, owner)
     if (live === undefined) return
     live.reject(error)
+    if (live.generation !== this.generationOf(key)) return
+    this.writeUnknown(key, live.fingerprint)
   }
 
-  /**
-   * Drop a cached succeeded result (cache invalidation before a forced
-   * re-execution, e.g. `inFlightOnly`). In-flight locks are never removable
-   * this way — they belong to their owner until `settle`/`fail`.
-   */
+  /** 仅清除 succeeded 缓存 + 递增代次（补偿流程用；unknown 由 release/confirm 处理）。 */
+  invalidate(key: string): void {
+    this.generations.set(key, this.generationOf(key) + 1)
+    this.cache.delete(key)
+  }
+
+  /** 状态解除：递增代次并清除 succeeded 与 unknown（下游对账后，后续同 key 重新执行）。 */
+  release(key: string): void {
+    this.generations.set(key, this.generationOf(key) + 1)
+    this.cache.delete(key)
+    this.unknown.delete(key)
+  }
+
+  /** 下游确认已提交：写入验证过的 succeeded 结果（可重放），并递增代次防旧写回。 */
+  confirm(key: string, fingerprint: string, result: ToolExecutionResult, ttlMs: number): void {
+    this.generations.set(key, this.generationOf(key) + 1)
+    this.unknown.delete(key)
+    this.cacheResult(key, 0, fingerprint, result, ttlMs)
+  }
+
+  /** Drop a cached succeeded result (inFlightOnly forced re-execution). */
   delete(key: string): void {
     this.cache.delete(key)
   }
 
-  /** Total live records (executing locks + cached results; expired cache rows count until lazily cleaned). */
+  /** Total live records (executing locks + cache + unknown). */
   get size(): number {
-    return this.executing.size + this.cache.size
+    return this.executing.size + this.cache.size + this.unknown.size
+  }
+
+  private generationOf(key: string): number {
+    return this.generations.get(key) ?? 1
   }
 
   /** Detach the live executing row if — and only if — `owner` still owns it. */
@@ -199,7 +208,20 @@ export class MemoryStore {
     return live
   }
 
-  /** Write a succeeded row into the cache, evicting oldest-first when over `maxEntries`. */
+  /** Write an unknown tombstone (FIFO-capped; eviction loses the marker — documented). */
+  private writeUnknown(key: string, fingerprint: string): void {
+    this.unknown.set(key, {
+      state: 'unknown',
+      owner: 0,
+      fingerprint,
+      createdAt: this.now(),
+      generation: this.generationOf(key),
+    })
+    if (this.unknown.size > this.maxEntries) {
+      this.evictOldest(this.unknown)
+    }
+  }
+
   private cacheResult(
     key: string,
     owner: number,
@@ -208,7 +230,6 @@ export class MemoryStore {
     ttlMs: number,
   ): void {
     const now = this.now()
-    // Expired rows no longer deserve budget: drop them before capacity checks.
     for (const [candidate, value] of this.cache) {
       if (now > value.expiresAt) this.cache.delete(candidate)
     }
@@ -218,18 +239,23 @@ export class MemoryStore {
       fingerprint,
       createdAt: now,
       expiresAt: now + ttlMs,
+      generation: this.generationOf(key),
       result,
     })
     if (this.cache.size > this.maxEntries) {
-      let oldestKey: string | undefined
-      let oldestAt = Number.POSITIVE_INFINITY
-      for (const [candidate, value] of this.cache) {
-        if (value.createdAt < oldestAt) {
-          oldestAt = value.createdAt
-          oldestKey = candidate
-        }
-      }
-      if (oldestKey !== undefined) this.cache.delete(oldestKey)
+      this.evictOldest(this.cache)
     }
+  }
+
+  private evictOldest<K, V extends { createdAt: number }>(table: Map<K, V>): void {
+    let oldestKey: K | undefined
+    let oldestAt = Number.POSITIVE_INFINITY
+    for (const [candidate, value] of table) {
+      if (value.createdAt < oldestAt) {
+        oldestAt = value.createdAt
+        oldestKey = candidate
+      }
+    }
+    if (oldestKey !== undefined) table.delete(oldestKey)
   }
 }

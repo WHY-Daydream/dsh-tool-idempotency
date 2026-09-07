@@ -13,11 +13,14 @@
  * - settlements are owner-scoped: stale owners cannot delete or overwrite;
  * - TTL governs the succeeded cache only, never an in-flight lock;
  * - `delete` invalidates the cache but never touches a live lock.
+ *
+ * 0.2.0 契约补充：无提交证据的错误 → unknown 墓碑（重试被阻止，release/confirm 解除）；
+ * 带 NOT_COMMITTED 证据 → failed_safe（释放且不留记录，重试允许）。
  */
 
 import { describe, expect, it } from 'vitest'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
-import { MemoryStore } from '../src/stores/memory.js'
+import { MemoryStore, NOT_COMMITTED_CODE } from '../src/stores/memory.js'
 
 function okResult(n: number): ToolExecutionResult {
   return { isError: false, content: [{ type: 'text', text: `ok-${n}` }] } as unknown as ToolExecutionResult
@@ -25,6 +28,15 @@ function okResult(n: number): ToolExecutionResult {
 
 function errResult(): ToolExecutionResult {
   return { isError: true, content: [{ type: 'text', text: 'boom' }] } as unknown as ToolExecutionResult
+}
+
+/** 带「确定未提交」证据的错误结果（failed_safe 路径）。 */
+function notCommittedResult(): ToolExecutionResult {
+  return {
+    isError: true,
+    content: [{ type: 'text', text: 'boom' }],
+    error: { message: 'not committed', info: { name: 'NotCommitted', code: NOT_COMMITTED_CODE } },
+  } as unknown as ToolExecutionResult
 }
 
 describe('MemoryStore P0 — in-flight locks survive cache capacity', () => {
@@ -128,7 +140,9 @@ describe('MemoryStore P0 — owner-scoped settlements', () => {
     expect(first).not.toBeNull()
     first!.promise.catch(() => undefined) // the first owner is failed below
     store.fail('K', first!.owner, new Error('boom-1'))
-    expect(store.get('K')).toBeUndefined() // retry may claim again
+    expect(store.get('K')?.state).toBe('unknown') // 0.2.0：无提交证据的失败 → unknown（重试被阻止）
+    store.release('K') // 对账解除 → 可重新执行
+    expect(store.get('K')).toBeUndefined()
 
     const second = store.reserve('K', 'fp-k')
     expect(second).not.toBeNull()
@@ -155,18 +169,27 @@ describe('MemoryStore P0 — owner-scoped settlements', () => {
     expect(store.get('K')?.result).toBe(done)
   })
 
-  it('error results release the lock for retry without caching', () => {
+  it('error results: NOT_COMMITTED evidence releases without a record; plain errors → unknown tombstone', () => {
     const store = new MemoryStore(5, 5)
-    const r = store.reserve('K', 'fp-k')
-    expect(r).not.toBeNull()
-    store.settle('K', r!.owner, errResult(), 1000)
-    expect(store.get('K')).toBeUndefined() // retry must re-execute
 
-    const again = store.reserve('K', 'fp-k')
-    expect(again).not.toBeNull()
-    expect(store.size).toBe(1)
-    store.settle('K', again!.owner, okResult(1), 1000)
-    expect(store.get('K')?.state).toBe('succeeded')
+    // failed_safe：带 NOT_COMMITTED 证据 → 释放且不留记录，重试允许重新执行
+    const r1 = store.reserve('K1', 'fp-1')
+    expect(r1).not.toBeNull()
+    store.settle('K1', r1!.owner, notCommittedResult(), 1000)
+    expect(store.get('K1')).toBeUndefined()
+    const again1 = store.reserve('K1', 'fp-1')
+    expect(again1).not.toBeNull()
+    store.settle('K1', again1!.owner, okResult(1), 1000)
+    expect(store.get('K1')?.state).toBe('succeeded')
+
+    // 无提交证据的错误 → unknown 墓碑（重试被阻止；release/confirm 解除）
+    const r2 = store.reserve('K2', 'fp-2')
+    expect(r2).not.toBeNull()
+    store.settle('K2', r2!.owner, errResult(), 1000)
+    expect(store.get('K2')?.state).toBe('unknown')
+    expect(store.get('K2')?.fingerprint).toBe('fp-2')
+    store.release('K2')
+    expect(store.get('K2')).toBeUndefined()
   })
 })
 

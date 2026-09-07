@@ -1,10 +1,21 @@
 /**
- * Idempotency / duplicate-execution guard for DeepSeek Harness tool calls.
+ * Idempotency / duplicate-execution guard for DeepSeek Harness tool calls
+ * (0.2.0: unknown 状态机 + Saga 缓存失效).
  *
- * Opted-in tools (see ARCHITECTURE.md §②) are deduplicated by idempotency
- * key: concurrent duplicates join the in-flight execution, later retries
- * reuse the cached result within the TTL, and a key reused with different
- * arguments fails loud instead of executing a conflicting side effect.
+ * Opted-in tools are deduplicated by idempotency key: concurrent duplicates
+ * join the in-flight execution, later retries reuse the cached result within
+ * the TTL, and a key reused with different arguments fails loud.
+ *
+ * 0.2.0 行为变化：不再把所有 `isError` 都解释为「可以重新执行」。
+ * - 成功结果 → `succeeded`：TTL 内按策略重放。
+ * - 带 `error.info.code === 'IDEMPOTENCY_NOT_COMMITTED'` 证据的错误 → `failed_safe`：
+ *   确定未提交，重试允许重新执行。
+ * - 其余错误（无提交证据，含超时/abort/普通抛错）→ `unknown`：阻止自动重执行，
+ *   需经 `ctx.toolIdempotency` 的 query/confirm/release 或下游对账后解除。
+ *   unknown 不随 TTL 自动回到可重执行。
+ * - `invalidate`（补偿流程）：清除 succeeded 缓存并递增代次，防止旧执行把
+ *   已失效结果写回（owner+代次校验）。「仅删除缓存≠可安全重执行」——补偿后
+ *   业务需结合新操作身份（新 key）决定后续动作。
  * @module @why-daydream/dsh-tool-idempotency
  */
 
@@ -12,7 +23,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { fingerprintOf } from './canonicalize.js'
-import { MemoryStore } from './stores/memory.js'
+import { MemoryStore, NOT_COMMITTED_CODE } from './stores/memory.js'
 
 export const name = 'tool-idempotency'
 
@@ -65,6 +76,26 @@ export const Config: z<Config> = z.object({
 const KEY_MISMATCH = 'IDEMPOTENCY_KEY_MISMATCH'
 /** Structured error code for a refused claim (in-flight capacity exhausted). */
 const CAPACITY_REJECTED = 'IDEMPOTENCY_CAPACITY_REJECTED'
+/** Structured error code for an auto-retry blocked by an unknown commit state. */
+const STATE_UNKNOWN = 'IDEMPOTENCY_STATE_UNKNOWN'
+
+/** 0.2.0 状态查询/解除/失效接口（挂载于 ctx.toolIdempotency）。 */
+export interface ToolIdempotencyApi {
+  /** 查询 key 的当前状态（executing/succeeded/unknown），无记录返回 undefined。 */
+  query(name: string, argumentsValue: Record<string, unknown>): {
+    state: 'executing' | 'succeeded' | 'unknown'
+    fingerprint: string
+    expiresAt?: number | undefined
+  } | undefined
+  /** 状态解除：下游对账确认无未决提交后，清除 succeeded/unknown，后续同 key 可重新执行。 */
+  release(name: string, argumentsValue: Record<string, unknown>): void
+  /** 下游确认已提交：以验证过的结果写入 succeeded（可重放），并递增代次。
+   *  注意：result 需为宿主导管可校验的完整物化形状（isError/content/value），
+   *  与正常执行返回的结果一致。 */
+  confirm(name: string, argumentsValue: Record<string, unknown>, result: ToolExecutionResult): void
+  /** 补偿流程：清除 succeeded 缓存并递增代次（仅删除缓存≠可安全重执行，需结合业务状态）。 */
+  invalidate(name: string, argumentsValue: Record<string, unknown>): void
+}
 
 /** Compile one `*`-wildcard tool pattern to an anchored RegExp (every other regex metacharacter is matched literally). */
 function wildcardToRegExp(pattern: string): RegExp {
@@ -73,12 +104,12 @@ function wildcardToRegExp(pattern: string): RegExp {
 }
 
 /** Resolve the idempotency key: explicit `keyArg` value, else the request fingerprint. */
-function resolveKey(exec: ToolExecution, keyArg: string | undefined): string {
+function resolveKey(name: string, argumentsValue: Record<string, unknown>, keyArg: string | undefined): string {
   if (keyArg !== undefined) {
-    const value = (exec.arguments as Record<string, unknown> | null)?.[keyArg]
+    const value = (argumentsValue as Record<string, unknown> | null)?.[keyArg]
     if (typeof value === 'string' && value.length > 0) return `explicit:${value}`
   }
-  return `fp:${fingerprintOf(exec)}`
+  return `fp:${fingerprintOf({ name, arguments: argumentsValue } as ToolExecution)}`
 }
 
 /** Build one structured `isError` tool result (same shape as dsh-chaos). */
@@ -101,8 +132,7 @@ class JoinerAbortedError extends Error {
 /**
  * Join an in-flight execution, but leave promptly when the joiner's own signal
  * aborts — without cancelling the owner or touching the store (settlement stays
- * owner-scoped). Matches ARCHITECTURE §④: an in-flight waiter that is aborted
- * should abandon the wait instead of hanging the cancelled turn.
+ * owner-scoped).
  */
 function joinExecution(
   ownerPromise: Promise<ToolExecutionResult>,
@@ -145,7 +175,7 @@ interface CompiledRule {
 }
 
 /**
- * Install the idempotency guard.
+ * Install the idempotency guard (0.2.0).
  * @param ctx - plugin context; listeners are scoped to it and disposed with it.
  * @param config - validated {@link Config}; misconfiguration fails loud at load.
  */
@@ -172,11 +202,47 @@ export function apply(ctx: Context, config: Config): void {
 
   const store = new MemoryStore(maxEntries, maxInFlight)
 
+  /** API 用 key 解析：命中规则（非 off）才有效。 */
+  function resolveApiKey(name: string, argumentsValue: Record<string, unknown>): string | undefined {
+    const rule = rules.find(candidate => candidate.regex.test(name))
+    if (rule === undefined || rule.mode === 'off') return undefined
+    return resolveKey(name, argumentsValue, rule.keyArg)
+  }
+
+  // 0.2.0：挂载状态查询/解除/失效接口（补偿流程与对账使用）。
+  // cordis Context 是容器代理：provide 声明并赋值一步完成（返回 disposer，fiber 卸载时自动清理）。
+  const api: ToolIdempotencyApi = {
+    query(name, argumentsValue) {
+      const key = resolveApiKey(name, argumentsValue)
+      if (key === undefined) return undefined
+      const entry = store.get(key)
+      if (entry === undefined) return undefined
+      return { state: entry.state, fingerprint: entry.fingerprint, expiresAt: entry.expiresAt }
+    },
+    release(name, argumentsValue) {
+      const key = resolveApiKey(name, argumentsValue)
+      if (key !== undefined) store.release(key)
+    },
+    confirm(name, argumentsValue, result) {
+      const key = resolveApiKey(name, argumentsValue)
+      if (key === undefined) return
+      store.confirm(key, fingerprintOf({ name, arguments: argumentsValue } as ToolExecution), result, ttlMs)
+    },
+    invalidate(name, argumentsValue) {
+      const key = resolveApiKey(name, argumentsValue)
+      if (key !== undefined) store.invalidate(key)
+    },
+  }
+  // 同一 ctx 重复挂载同一插件时只提供一次服务（避免 provide 同名冲突）。
+  if (ctx.get('toolIdempotency') === undefined) {
+    ctx.provide('toolIdempotency', api)
+  }
+
   ctx.on('tools/execute', async (exec, next): Promise<ToolExecutionResult> => {
     const rule = rules.find(candidate => candidate.regex.test(exec.name))
     if (rule === undefined || rule.mode === 'off') return next()
 
-    const key = resolveKey(exec, rule.keyArg)
+    const key = resolveKey(exec.name, exec.arguments as Record<string, unknown>, rule.keyArg)
     const fingerprint = fingerprintOf(exec)
     const existing = store.get(key)
 
@@ -190,8 +256,6 @@ export function apply(ctx: Context, config: Config): void {
           'IdempotencyKeyMismatch',
         )
       }
-      // Abort-aware join: leave promptly if this caller's signal aborts while
-      // the owner is still running — never cancel the owner or touch the store.
       return joinExecution(existing.promise as Promise<ToolExecutionResult>, exec.signal)
     }
 
@@ -204,19 +268,33 @@ export function apply(ctx: Context, config: Config): void {
         )
       }
       if (rule.mode === 'reuse') {
-        // Replay the cached result; the side effect does not happen again.
         return existing.result as ToolExecutionResult
       }
       // inFlightOnly: never replay a cached result — execute again.
       store.delete(key)
     }
 
+    if (existing !== undefined && existing.state === 'unknown') {
+      if (existing.fingerprint !== fingerprint) {
+        return idempotencyError(
+          `idempotency key \`${key}\` is in unknown state with different arguments — refusing the conflicting call`,
+          KEY_MISMATCH,
+          'IdempotencyKeyMismatch',
+        )
+      }
+      // 0.2.0：unknown 不自动重执行（不随 TTL 自动解除）。需下游对账后
+      // release/confirm，或改用新的操作身份（新 key）。
+      return idempotencyError(
+        `idempotency key \`${key}\` is in UNKNOWN state — cannot determine whether the side effect committed; do NOT blindly re-execute; reconcile downstream, then release/confirm via ctx.toolIdempotency, or retry with a new operation identity`,
+        STATE_UNKNOWN,
+        'IdempotencyStateUnknown',
+      )
+    }
+
     // Fresh execution. Claim the in-flight slot synchronously before the tool
     // body can run, so two concurrent callers cannot both observe a miss.
     const reservation = store.reserve(key, fingerprint)
     if (reservation === null) {
-      // In-flight capacity is exhausted. Refuse loudly instead of running the
-      // side effect outside the guard or evicting an executing lock.
       return idempotencyError(
         `idempotency in-flight capacity reached (maxInFlight ${maxInFlight}) for tool \`${exec.name}\` — refusing the call; retry when a slot is free`,
         CAPACITY_REJECTED,
@@ -228,9 +306,8 @@ export function apply(ctx: Context, config: Config): void {
     const promise = (async (): Promise<ToolExecutionResult> => {
       try {
         const result = await next()
-        // settle: success caches for replay; isError releases the lock without
-        // caching (a retry must re-execute). Owner-scoped: a stale completion
-        // can never overwrite or delete a newer record.
+        // 0.2.0：store.settle 按提交证据分类（succeeded/failed_safe/unknown）。
+        // owner+代次校验：失效通知与旧执行并发时，陈旧完成不写回。
         store.settle(key, owner, result, ttlMs)
         return result
       } catch (error) {
@@ -241,3 +318,5 @@ export function apply(ctx: Context, config: Config): void {
     return promise
   })
 }
+
+export { NOT_COMMITTED_CODE } from './stores/memory.js'

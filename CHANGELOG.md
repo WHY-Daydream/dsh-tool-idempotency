@@ -3,6 +3,41 @@
 本项目的版本历史。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.0] - 2026-09-07（开发中，未发布；分支 `0.2.0`）
+
+> **状态：实现与专项测试完成（139/139 用例全绿，typecheck exit 0），未发布。**
+> 解决 0.1.3 明确接受的两个正确性缺口（unknown 状态机、Saga 缓存失效）。
+> 本版**含行为变化**：不再把所有 `isError` 解释为「可以重新执行」。
+
+### 行为变化（相对 0.1.3）
+
+- **unknown 状态（K1 修复方向）**：无提交证据的失败（超时/abort/普通抛错/未带证据码的错误
+  结果）进入 `unknown` 状态——**阻止自动重执行**，且**不随 TTL 自动解除**。重试返回结构化
+  错误 `IDEMPOTENCY_STATE_UNKNOWN`（`IdempotencyStateUnknown`）。须经下游对账后
+  `release`/`confirm` 解除，或改用新的操作身份（新 key）。
+- **failed_safe**：工具/包装器返回带证据码 `IDEMPOTENCY_NOT_COMMITTED`
+  （`error.info.code`）的错误结果时，视为「确定未提交」，释放锁且不留记录，重试允许
+  重新执行。**无证据时不得凭错误码猜测提交状态**。
+- **Saga 缓存失效（K2 修复方向）**：新增 `ctx.get('toolIdempotency')` 接口——
+  `query` / `release` / `confirm` / `invalidate`。
+  - `invalidate(key)`：清除 succeeded 缓存并递增**代次**；旧 owner 晚到结算（owner+代次
+    校验）不会把已失效结果写回。
+  - `confirm(key, result)`：下游确认已提交 → 写入验证过的结果（可重放）。
+  - `release(key)`：状态解除 → 后续同 key 重新执行。
+  - **仅删除缓存≠可安全重执行**：补偿后需结合业务状态与新的操作身份决定后续动作。
+
+### Fixed（相对 0.1.3 的 FAIL 复现）
+
+- K1（unknown）：副作用已提交但响应丢失后，重试**不再盲目再次执行**（effects=2 场景
+  变为重试被阻止 + 显式对账路径）。
+- K2（Saga 补偿后一致性）：补偿流程可 `invalidate` 使原操作成功缓存失效，且代次机制
+  防止旧执行写回陈旧结果。
+
+### 迁移注意
+
+- 依赖「失败即重试」语义的调用方必须显式提供 `IDEMPOTENCY_NOT_COMMITTED` 证据码，或
+  在重试前 `query` 状态并 `release`/`confirm`。详见 `docs/UPGRADE.md` [0.2.0]。
+
 ## [0.1.3] - 2026-09-07（发布候选，尚未发布）
 
 > **发布状态：候选，未发布、未上 npm。** 内容 = 0.1.2 源码线的兼容 patch（未发布，

@@ -11,7 +11,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import {
-  deferred, executeTool, registerTool, tick, toolHarness, until,
+  deferred, executeTool, idempotencyApi, registerTool, tick, toolHarness, until,
 } from './harness.js'
 
 describe('取消与异常：waiter 取消', () => {
@@ -55,7 +55,7 @@ describe('取消与异常：waiter 取消', () => {
 })
 
 describe('取消与异常：owner 失败', () => {
-  it('owner 抛错：joiners 收到同一失败、锁释放、重试重新执行（无僵尸锁）', async () => {
+  it('owner 抛错：joiners 收到同一失败、状态转 unknown、重试被阻止；release 对账后重新执行（无僵尸锁）', async () => {
     let attempts = 0
     const gate = deferred<ContentBlock[]>()
     const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
@@ -79,9 +79,16 @@ describe('取消与异常：owner 失败', () => {
     expect(JSON.stringify(rOwner)).toContain('boom')
     expect(JSON.stringify(rJoiner)).toContain('boom')
 
+    // 0.2.0：无提交证据的失败 → unknown，重试被阻止（不再盲目重执行）
+    const blocked = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(blocked).toMatchObject({ isError: true, error: { info: { code: 'IDEMPOTENCY_STATE_UNKNOWN' } } })
+    expect(attempts).toBe(1)
+
+    // 对账解除后重试重新执行
+    idempotencyApi(ctx).release('create_order', { orderId: 'a' })
     const retry = await executeTool(ctx, 'create_order', { orderId: 'a' })
     expect(retry).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-2' }] })
-    expect(attempts).toBe(2) // 锁已释放：重试重新执行
+    expect(attempts).toBe(2) // 锁已释放、状态已解除：重试重新执行
   })
 
   it('预取消信号：调用快速失败且不占锁，后续正常调用恰好执行一次', async () => {
@@ -111,7 +118,7 @@ describe('取消与异常：owner 失败', () => {
 })
 
 describe('取消与异常：同步抛错', () => {
-  it('下游同步抛错：claim 后立即释放锁，重试重新执行，无错误释放锁', async () => {
+  it('下游同步抛错：claim 后释放锁并转 unknown，重试被阻止；release 后重新执行，无错误释放锁', async () => {
     let attempts = 0
     const records: string[] = []
     const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
@@ -130,9 +137,15 @@ describe('取消与异常：同步抛错', () => {
     expect(attempts).toBe(0) // 工具体未被执行
 
     removeThrower()
+    // 0.2.0：同步抛错（无提交证据）→ unknown，重试被阻止
+    const blocked = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(blocked).toMatchObject({ isError: true, error: { info: { code: 'IDEMPOTENCY_STATE_UNKNOWN' } } })
+    expect(attempts).toBe(0)
+
+    idempotencyApi(ctx).release('create_order', { orderId: 'a' })
     const second = await executeTool(ctx, 'create_order', { orderId: 'a' })
     expect(second).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
-    expect(attempts).toBe(1) // 失败的 claim 已释放锁；重试恰好执行一次
+    expect(attempts).toBe(1) // 失败 claim 已释放锁、状态已解除；重试恰好执行一次
     expect(records).toEqual(['exec-1'])
   })
 })
