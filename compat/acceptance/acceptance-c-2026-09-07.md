@@ -123,6 +123,21 @@ mismatch（已完成 + 并发）/ 并发 join / 抛错重试 / TTL 过期重执�
 上一节 C3 的旧分账（“正确性断言 4 PASS / 缺陷复现 2 FAIL”）描述的是 631cc44 时的
 覆盖口径；本节对取消语义补强与分类后以其为准。
 
+## 评审修订轮 2（commit bbb0c2c 之后，2026-09-07）— 发布门禁与屏障
+
+发布包内容本轮未变（SHA 保持 `06b6ee24…`），本轮只改发布流程、测试脚本与记录：
+
+- **[P1] npm-publish.yml 发布已验收归档**：改为在 `compat/acceptance/` 中
+  `sha256sum -c tgz-<版本>.sha256` 通过后，`npm publish ./why-daydream-dsh-tool-idempotency-<版本>.tgz`
+  ——发布字节 == 本地验收归档；CI 不再重打包、失败即停。
+- **[P2] 复验版本号来源修正**：`PKG_VERSION` 取自 package.json 并核验归档存在；
+  不再用 `GITHUB_REF_NAME#v` 推导（分支手动触发会得 `main`/分支名）；tag 触发时
+  发布前校验 tag == package.json 版本；发布后 integrity 复验用同一 `PKG_VERSION`。
+- **c3 joined 屏障事件化（非阻塞改进落实）**：waiter 场景在插件前注册
+  `ctx.on('tools/execute')` 透传探针（按 signal 识别），gate 续体在微任务中执行 →
+  触发 abort 时 waiter 必然已进入 join 分支；移除 `sleep(25)` 与轮询。重跑实测
+  `C3_SCENARIOS PASS=3 KNOWN_DEFECT_REPRODUCED=3 FAIL=0`（退出码 0）。
+
 ## C4 兼容矩阵（逐项状态）
 
 | 轨道 | 目标 | 状态 | 证据 |

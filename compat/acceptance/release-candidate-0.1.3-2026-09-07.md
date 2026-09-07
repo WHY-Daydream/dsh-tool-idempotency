@@ -34,6 +34,12 @@ SHA-256：`06b6ee245fe5b8ec838f80f90883f7ce2b0c5acf9219c51f273b32a3ecf41fb0`
 > join 与取消屏障、P1-2 同 tgz 发布门禁、P2-3 三态输出与 Saga 精确断言、P2-4 移除
 > 无效 exports）全部处理并复验；产物 SHA 随 exports/lib 变更重生成。详见
 > `acceptance-c-2026-09-07.md`「评审修订轮」与 `CHANGELOG.md`。
+>
+> 修订记录 2（commit bbb0c2c 后，评审 round 2 认可）：npm-publish.yml 改为发布
+> **已验收归档**（`sha256sum -c tgz-<版本>.sha256` 通过才发，不重打包）；版本号取自
+> package.json 并核验归档存在，tag 触发时发布前校验 tag==版本，发布后 integrity
+> 复验用同一版本号；c3 joined 屏障事件化（探针 + 微任务，替代 sleep）。发布包内容
+> 未变，SHA 保持 `06b6ee24…`。
 
 | 验收 | 结果 |
 | --- | --- |

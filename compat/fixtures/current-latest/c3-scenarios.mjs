@@ -92,26 +92,32 @@ await runScenario('结构化结果重放：不同 callId 得到逐字一致内�
   return 'PASS'
 })
 
-// ---------- 2. waiter 取消（真实进入 join 后取消） ----------
+// ---------- 2. waiter 取消（真实进入 join 后取消，事件化 joined 屏障） ----------
 await runScenario('waiter 取消：owner 启动后 waiter 确认 join 再被 abort → waiter 独立退出，owner 不受影响', async () => {
   let attempts = 0
   const gate = deferred()
-  const ctx = await boot({ rules: [{ tool: 'create_order' }] })
-  register(ctx, 'create_order', async () => { attempts += 1; return gate.promise })
-  const ownerCtrl = new AbortController()
+  const ctx = new Context()
+  await ctx.plugin(SystemPrompt)
+  await ctx.plugin(ToolRuntime)
+  // joined 屏障（评审建议的事件通知，替代 sleep）：在插件之前注册透传探针，
+  // 监听 tools/execute 链上携带 waiter signal 的 dispatch；插件 listener 在该
+  // 同步链内完成 guard（join 决策为同步），gate 续体在微任务中执行 → 触发 abort
+  // 时 waiter 必然已进入 join 分支。
   const waiterCtrl = new AbortController()
+  const joinedGate = deferred()
+  ctx.on('tools/execute', (exec, next) => {
+    const result = next()
+    if (exec.signal === waiterCtrl.signal) joinedGate.resolve(true)
+    return result
+  })
+  await ctx.plugin(Idempotency, { rules: [{ tool: 'create_order' }] })
+  register(ctx, 'create_order', async () => { attempts += 1; return gate.promise })
 
+  const ownerCtrl = new AbortController()
   const owner = fire(ctx, 'create_order', { orderId: 'o1' }, ownerCtrl.signal)
   await until(() => attempts === 1) // started 屏障：owner 已启动并持有执行锁
   const waiter = fire(ctx, 'create_order', { orderId: 'o1' }, waiterCtrl.signal) // 同 key → 必经 join 分支
-  await until(() => !waiterCtrl.signal.aborted)
-  await sleep(25) // joined 同步区：waiter 的 dispatch 已进入 guard join（同 key 同参数无其他分支）
-  // abort 前先证明 waiter 确在等待（owner 未完成时 waiter 不应自行结束）
-  let waiterSettledEarly = false
-  withTimeout(waiter.then(() => { waiterSettledEarly = true }, () => { waiterSettledEarly = true }), 40, '')
-    .catch(() => undefined)
-  await sleep(50)
-  assert.equal(waiterSettledEarly, false, 'waiter 应仍在 join 等待（owner 未完成），测试屏障失效')
+  await withTimeout(joinedGate.promise, 1000, 'waiter 的 dispatch 未到达 tools/execute 链（joined 屏障超时）')
   assert.equal(attempts, 1)
 
   waiterCtrl.abort()
