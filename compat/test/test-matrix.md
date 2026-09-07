@@ -124,4 +124,21 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 | C2 组合注册顺序语义 | 两者同为 `tools/execute` 包装，先注册者在外层：bulkhead 外层 → 同 key 先排队后 join；idempotency 外层 → 同 key 直接 join。组合行为由注册顺序决定，需在部署文档中声明 |
 | C3 timeout 合作式契约 | 非合作下游（不转发 exec.signal abort）下 timeout 不生效、调用挂起且执行锁被永久占用——工具必须声明并转发 signal（timeoutMs 声明的语义承诺） |
 
+## 8. Phase 4 压力/内存/长期运行（2026-09-07，tests/correctness/stress.spec.ts，6 用例全绿）
+
+| 负载 | 结果 | 实测证据（本机基线） |
+| --- | --- | --- |
+| 同 key 500 并发 | **PASS** | 副作用恰 1 次，500 waiter 全部结算且结果一致（屏障驱动） |
+| 不同 key 200 并发（maxInFlight=16） | **PASS** | executed=16、capacity-rejected=184（reserve 同步裁定，无并发漏网）；槽释放后恢复 |
+| 混合负载（100 执行 + 100 重放） | **PASS** | 真实执行=100（命中率 50%）；基线 200 独立=62.0ms，插件同量=68.8ms（相对 +11%，不预设毫秒阈值） |
+| 大参数/大结果 | **PASS** | 2MB content 完整缓存重放（cache-boundary 套件，内存可控：8 轮 churn heap 采样 44,37,33,46,47,40,47,38 MB，无线性增长） |
+| 大量 waiter 加入后取消（5 轮 × 50） | **PASS** | 全部干净退出、owner 正常结算、heap 净增长 -1.5MB（无监听器/Promise 积累） |
+| 长期未完成 owner（maxInFlight=1） | **PASS** | 5 次新 key 持续容量拒绝且诊断含 `maxInFlight 1`；owner 完成即恢复 |
+| 持续运行周期清空（8 轮 × 200 key） | **PASS** | 缓存上限 1024（FIFO）下 heap 收敛，无持续增长 |
+
+性能/内存基线结论：正确性零失败；延迟相对基线 +11%（本机 node v22.22.0）；
+内存无数量级积累。阈值按本机实测记录，未预先承诺毫秒数；精确泄漏检测
+（--expose-gc 采样）记录为局限，宽松上界断言仅用于捕获数量级泄漏。
+
+
 
