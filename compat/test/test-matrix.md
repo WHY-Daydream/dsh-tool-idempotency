@@ -549,17 +549,28 @@ semver 已确定性证明 0.1.2-rc.1 SATISFIES UNION；修复后 transaction 的
 
 | Gate | 内容 | 状态 |
 | --- | --- | --- |
-| TI-1 | 两插件在目标 host clean install，无 peer 绕过 | **BLOCKED-网络**（fixture package.json 就绪） |
+| TI-1 | 两插件在目标 host clean install，无 peer 绕过 | **BLOCKED — 执行环境 DNS/网络**（双方复验：git clone `Could not resolve host: github.com`；npm `EAI_AGAIN getaddrinfo registry.npmjs.org`——未走到 Arborist peer solving 阶段，**无新 ERESOLVE**，不得归因残余 peer edge） |
 | TI-2 | 真实调用链（host → transaction → idempotency → tool → side effect）执行 | 🟡 link-mode 验证通过（combo-link-run 场景 1）；⏳ packaged clean-install 执行 pending |
 | TI-3 | commit / rollback / unknown 三条关键路径 | 🟡 link-mode 验证通过（场景 1-3）；⏳ packaged 执行 pending |
 | TI-4 | stale executionId 不得作用于新 transaction execution | ✅ link-mode 回归通过（场景 4，组合 18/18 ALL PASS）；⏳ packaged 执行 pending |
 | TI-5 | 组合测试进入 run-all/acceptance | ✅ 已接入 run-all；⏳ clean-install 执行 pending（未安装 → BLOCKED 且整体失败） |
 | ERESOLVE root cause | 精确 dependency edge | ✅ **已定位并修复**（transaction peer `>=0.0.1-rc.1` 写窄 → 扩为 UNION；semver 全 SATISFIED + build/unit 回归 + tgz 重打）；在线 npm ci 确认归 TI-1 |
 
-最终 verdict（负责人 2026-09-07）：**0.2.0 HOLD（已收窄）**——不是 correctness bug、
-不是 fencing bug、不是 transaction runtime bug；唯一未决是 **尚未证明真实 npm dependency
-graph 可 clean install**。link-mode 18/18 = runtime composition evidence ✅，但不替代
-clean-install compatibility evidence ❌（release discipline 不变）。
+最终 verdict（负责人 2026-09-07，双方复验后冻结）：**0.2.0 HOLD**——不是 correctness bug、
+不是 fencing bug、不是 transaction runtime bug；唯一未闭环是 **联网环境下的真实
+clean-install / packaged-composition 证据**。link-mode 18/18 = runtime composition
+evidence ✅，**不升级为 acceptance PASS**（缺真实 package → npm dependency graph →
+clean install → package boundary → combo acceptance → full run-all 链）。
+
+**发布条件已冻结，不再扩大 review**（2026-09-07）：在新证据出现前**不再改
+idempotency、transaction、peer range 或 fixture**。仅剩执行链（current-latest +
+prev-release 两条线各跑一遍）：
+- `cd compat/fixtures/transaction-combo-0.2.0 && npm install --loglevel verbose 2>&1 | tee npm-install.log`
+- `node combo-acceptance.mjs`
+- `node compat/test/run-all.mjs`（prev-release fixture 同法）
+- 两条线全 PASS → GATE-TI-1/2/3/4/5 CLEARED → **0.2.0: HOLD → RELEASE CANDIDATE**
+- 若出现真 ERESOLVE（`While resolving:` / `Found:` / `Could not resolve dependency:` /
+  `Conflicting peer dependency:`）→ 只针对该 dependency edge 做最小修复。
 
 ### 14.3 资产与兼容矩阵
 
