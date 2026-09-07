@@ -564,8 +564,10 @@ clean-install compatibility evidence ❌（release discipline 不变）。
 ### 14.3 资产与兼容矩阵
 
 - fixture：`compat/fixtures/transaction-combo-0.2.0/`——宿主精确版本 + transaction 0.1.0
-  （file: tgz）+ idempotency 0.2.0 候选（file: tgz）；`combo-acceptance.mjs` 覆盖
-  4 场景（commit/rollback/unknown/stale fencing），内置 `[VERSION]` 校验。
+  （`compat/acceptance/why-daydream-dsh-tool-transaction-0.1.0.tgz`，修复后重打，
+  sha256 `4930ce5c…`）+ idempotency 0.2.0 候选（file: tgz）；`combo-acceptance.mjs`
+  覆盖 4 场景（commit/rollback/unknown/stale fencing），内置 `[VERSION]` 校验。
+  两组合 fixture 均引用**仓库内相对路径**（用户 clone 后即可安装）。
 - run-all：`combo:transaction×idempotency` 阶段（GATE-TI-5，随 fixture 就绪自动执行）。
 - 兼容矩阵（待网络恢复 / 用户侧执行）：
 
@@ -575,13 +577,13 @@ clean-install compatibility evidence ❌（release discipline 不变）。
 | prev-release（0.1.1-rc.2 线） | 0.1.0 | 0.2.0 | BLOCKED-网络 | BLOCKED-网络 |
 
 执行命令（网络恢复后）：
-- **第一步：抓 ERESOLVE 精确报错**（若存在；不要改代码、不要 --force/--legacy-peer-deps）：
-  `cd compat/fixtures/transaction-combo-0.2.0 && npm ci --loglevel verbose 2>&1 | tee npm-ci.log`
+- **首次（fixture 无锁文件）用 `npm install`**（会生成 package-lock.json；锁文件就绪后
+  可用 `npm ci` 复验）：
+  `cd compat/fixtures/transaction-combo-0.2.0 && npm install --loglevel verbose 2>&1 | tee npm-install.log`
   关注段：`While resolving:` / `Found:` / `Could not resolve dependency:` /
-  `Conflicting peer dependency:`——这几行直接定位 #3 的 transitive peer edge。
-  同时记录环境：`node -v; npm -v; npm config get registry`；
-  sanity：`npm view @deepseek-ai/schemastery@3.18.1 version`（预期 `3.18.1`）。
-- 无 ERESOLVE 时：`node combo-acceptance.mjs`（GATE-TI-2/3/4 packaged 执行）
+  `Conflicting peer dependency:`——若出现即贴回定位残余 edge。
+  同时记录环境：`node -v; npm -v; npm config get registry`。
+- 安装成功后：`node combo-acceptance.mjs`（GATE-TI-2/3/4 packaged 执行）
 - 全套件：`node compat/test/run-all.mjs`（combo 阶段随 fixture 就绪自动执行）
 - **prev-release 组合 fixture 已建立**：`compat/fixtures/transaction-combo-prev-release-0.2.0/`
   （宿主 0.1.1-rc.2 闭包 + 双插件，脚本与 current-latest 版同构）——执行命令同上；

@@ -6,7 +6,7 @@
   "type": "module",
   "dependencies": {
     "@why-daydream/dsh-tool-idempotency": "file:../../acceptance/why-daydream-dsh-tool-idempotency-0.2.0.tgz",
-    "@why-daydream/dsh-tool-transaction": "file:/mnt/workspace/DSH/dsh-tool-transaction/why-daydream-dsh-tool-transaction-0.1.0.tgz",
+    "@why-daydream/dsh-tool-transaction": "file:../../acceptance/why-daydream-dsh-tool-transaction-0.1.0.tgz",
     "@deepseek-ai/cordis": "4.0.2",
     "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
     "@deepseek-ai/dsh-invariants": "0.1.1-rc.2",
