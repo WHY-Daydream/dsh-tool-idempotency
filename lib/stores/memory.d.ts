@@ -33,10 +33,20 @@ export interface StoreEntry {
     state: 'executing' | 'succeeded' | 'unknown';
     owner: number;
     fingerprint: string;
+    /**
+     * 每轮执行的 **fencing token**（`crypto.randomUUID()`）：每次 reserve 分配新值、
+     * **永不回退且生命周期内唯一**（UUID 不复用）。对账 API（release/confirm/invalidate）
+     * 以 `fingerprint + expectedExecutionId` 唯一锁定某一轮执行——旧对账结果（ABA）永远
+     * 无法作用于新一轮执行。与 `generation`（key epoch，写回检测用，可随记录生命周期
+     * 清理）职责**彻底拆开**：删除业务状态 ≠ 删除 fencing 历史。
+     */
+    executionId: string;
     createdAt: number;
     expiresAt?: number;
     promise?: Promise<ToolExecutionResult>;
     result?: ToolExecutionResult;
+    /** key epoch：reserve 时捕获，invalidate/release/confirm 递增——仅用于 settle/fail
+     *  的「执行期间状态被外部改动」写回检测；可随记录生命周期清理（P1-2）。 */
     generation: number;
 }
 /** A successfully reserved in-flight slot. */
@@ -101,19 +111,27 @@ export declare class MemoryStore {
     fail(key: string, owner: number, error: unknown): void;
     /** 已有记录的 fingerprint 校验：记录存在且 fingerprint 不匹配 → 拒绝（保持原状态）。 */
     private fingerprintMatches;
+    /**
+     * fencing token 校验（**与 query 返回同源**：都读记录本身的 executionId）：
+     * expectedExecutionId 提供时，必须与当前记录一致；**记录不存在 → 拒绝**（旧对账
+     * 目标已消失/已被新一轮执行取代，无法确认其针对哪一轮，保守拒绝）。
+     */
+    private fencingMatches;
     /** 仅清除 succeeded 缓存 + 递增代次 + 标记失效态（补偿流程用；unknown 由
-     *  release/confirm 处理）。**校验 fingerprint**：已有记录属于不同参数（另一请求）
-     *  时拒绝且保持原状态。失效态下旧执行晚到的失败必须保留 unknown（见 settle/fail）。 */
-    invalidate(key: string, fingerprint?: string): boolean;
+     *  release/confirm 处理）。**校验 fingerprint + expectedExecutionId**：已有记录属于
+     *  不同参数（另一请求）或旧执行（ABA）时拒绝且保持原状态。失效态下旧执行晚到的
+     *  失败必须保留 unknown（见 settle/fail）。 */
+    invalidate(key: string, fingerprint?: string, expectedExecutionId?: string): boolean;
     /** 状态解除：递增代次并清除 succeeded 与 unknown，移除失效标记（下游对账后，
-     *  后续同 key 重新执行；旧执行晚到不得重新上锁）。**校验 fingerprint 与可选代次**
-     * （异步对账版本绑定）：已有记录属于不同参数 → 拒绝；expectedGeneration 与当前
-     *  代次不一致（记录已被新一轮执行消费）→ 拒绝，避免旧对账结果作用于新一轮执行。 */
-    release(key: string, fingerprint?: string, expectedGeneration?: number): boolean;
+     *  后续同 key 重新执行；旧执行晚到不得重新上锁）。**校验 fingerprint + 可选
+     *  expectedExecutionId**（异步对账 fencing）：已有记录属于不同参数/旧执行（ABA）
+     *  → 拒绝且保持原状态，旧对账结果永远无法作用于新一轮执行。 */
+    release(key: string, fingerprint?: string, expectedExecutionId?: string): boolean;
     /** 下游确认已提交：写入验证过的 succeeded 结果（可重放），并递增代次防旧写回、
-     *  移除失效标记（视为对账解除）。**校验 fingerprint**：已有记录属于不同参数 →
-     *  拒绝且保持原状态。 */
-    confirm(key: string, fingerprint: string, result: ToolExecutionResult, ttlMs: number): boolean;
+     *  移除失效标记（视为对账解除）。**校验 fingerprint + expectedExecutionId**：已有
+     *  记录属于不同参数/旧执行时拒绝且保持原状态；确认记录沿用被确认轮次的 token
+     *  （未提供时生成新 token）。 */
+    confirm(key: string, fingerprint: string, result: ToolExecutionResult, ttlMs: number, expectedExecutionId?: string): boolean;
     /** Drop a cached succeeded result (inFlightOnly forced re-execution). */
     delete(key: string): void;
     /** Total live records (executing locks + cache + unknown). */

@@ -68,33 +68,41 @@ export declare const Config: z<Config>;
 /** 0.2.0 状态查询/解除/失效接口（挂载于 ctx.toolIdempotency）。 */
 export interface ToolIdempotencyApi {
     /** 查询 key 的当前状态（executing/succeeded/unknown），无记录返回 undefined。
-     *  `generation` 为该记录的版本（异步对账可回传做版本绑定，避免旧对账作用于新一轮执行）。 */
+     *  `executionId` 为当前记录所属执行的 **fencing token**（每轮执行唯一、永不回退；
+     *  异步对账回传 `expectedExecutionId` 唯一锁定该轮执行——旧对账结果（ABA）永远
+     *  无法作用于新一轮执行）。 */
     query(name: string, argumentsValue: Record<string, unknown>): {
         state: 'executing' | 'succeeded' | 'unknown';
         fingerprint: string;
-        generation: number;
+        executionId: string;
         expiresAt?: number | undefined;
     } | undefined;
     /** 状态解除：下游对账确认无未决提交后，清除 succeeded/unknown，后续同 key 可重新执行。
-     *  **校验 fingerprint**：已有记录属于不同参数（另一请求）时拒绝且保持原状态；
-     *  `expectedGeneration` 可绑定查询到的版本（记录被新一轮执行消费后拒绝）。 */
+     *  **校验 fingerprint + expectedExecutionId**：已有记录属于不同参数（另一请求）或
+     *  旧执行（ABA）时拒绝且保持原状态（`IDEMPOTENCY_GENERATION_MISMATCH`）。 */
     release(name: string, argumentsValue: Record<string, unknown>, options?: {
-        expectedGeneration?: number;
+        expectedExecutionId?: string;
     }): {
         ok: boolean;
         error?: string;
     };
     /** 下游确认已提交：以验证过的结果写入 succeeded（可重放），并递增代次。
-     *  **校验 fingerprint**：已有记录属于不同参数时拒绝且保持原状态。
+     *  **校验 fingerprint + expectedExecutionId**：已有记录属于不同参数/旧执行时拒绝
+     *  且保持原状态（`IDEMPOTENCY_GENERATION_MISMATCH`）。
      *  注意：result 需为宿主导管可校验的完整物化形状（isError/content/value），
      *  与正常执行返回的结果一致。 */
-    confirm(name: string, argumentsValue: Record<string, unknown>, result: ToolExecutionResult): {
+    confirm(name: string, argumentsValue: Record<string, unknown>, result: ToolExecutionResult, options?: {
+        expectedExecutionId?: string;
+    }): {
         ok: boolean;
         error?: string;
     };
     /** 补偿流程：清除 succeeded 缓存并递增代次（仅删除缓存≠可安全重执行，需结合业务状态）。
-     *  **校验 fingerprint**：已有记录属于不同参数时拒绝且保持原状态。 */
-    invalidate(name: string, argumentsValue: Record<string, unknown>): {
+     *  **校验 fingerprint + expectedExecutionId**：已有记录属于不同参数/旧执行时拒绝
+     *  且保持原状态（`IDEMPOTENCY_GENERATION_MISMATCH`）。 */
+    invalidate(name: string, argumentsValue: Record<string, unknown>, options?: {
+        expectedExecutionId?: string;
+    }): {
         ok: boolean;
         error?: string;
     };
