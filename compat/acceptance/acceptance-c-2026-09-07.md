@@ -125,6 +125,22 @@ mismatch（已完成 + 并发）/ 并发 join / 抛错重试 / TTL 过期重执�
 
 ## 评审修订轮 2（commit bbb0c2c 之后，2026-09-07）— 发布门禁与屏障
 
+## 发布执行记录（2026-09-07，registry 已上线）
+
+- **`@why-daydream/dsh-tool-idempotency@0.1.3` 已发布到 npm registry**（账户
+  why-daydream，`--access public`，发布的是已验收归档 tgz，未重打包）。
+- 发布前门禁全绿：typecheck/tests/build/p0/unit/e2e 全 EXIT 0；
+  `(cd compat/acceptance && sha256sum -c tgz-0.1.3.sha256)` 通过；归档内
+  name/version 与仓库一致。
+- 发布后复验：registry `dist-tags.latest = 0.1.3`；
+  `npm pack @why-daydream/dsh-tool-idempotency@0.1.3` 下载包 sha256 =
+  `06b6ee245fe5b8ec838f80f90883f7ce2b0c5acf9219c51f273b32a3ecf41fb0`，与验收归档一致。
+- 干净目录（`/tmp/postpub-013`，非 fixture）从 registry 安装 0.1.3 + peer 闭包
+  （cordis 4.0.2 + dsh-* 0.1.2-rc.1）：`require.resolve` 指向该目录
+  `node_modules/@why-daydream/dsh-tool-idempotency/lib/index.js`（registry 包）；
+  agent-e2e 去重冒烟 EXIT 0（executions=1，副作用一次）；regression 14/14 EXIT 0。
+- unknown（K1×2）与 Saga 补偿后一致性（K2）限制随 0.1.3 保留并已显著声明。
+
 发布包内容本轮未变（SHA 保持 `06b6ee24…`），本轮只改发布流程、测试脚本与记录：
 
 - **[P1] npm-publish.yml 发布已验收归档**：改为在 `compat/acceptance/` 中

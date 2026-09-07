@@ -1,5 +1,11 @@
 # 发布候选记录 — 0.1.3（2026-09-07）
 
+> **发布状态：✅ 已于 2026-09-07 发布到 npm registry**（`@why-daydream/dsh-tool-idempotency@0.1.3`，
+> dist-tags latest=0.1.3）。发布的是已验收归档 `compat/acceptance/why-daydream-dsh-tool-idempotency-0.1.3.tgz`。
+> 发布后复验：registry 下载 sha256 = `06b6ee245fe5b8ec838f80f90883f7ce2b0c5acf9219c51f273b32a3ecf41fb0`
+> 与验收归档一致；干净目录（非 fixture）安装 registry 0.1.3 后 agent-e2e 去重冒烟
+> （executions=1）与 regression 14/14 均 EXIT 0。unknown 与 Saga 限制随本版保留并声明。
+
 范围决策（负责人已确认分支 A）：**先交付两个 P0 修复 + 兼容更新为 0.1.3 候选，收窄
 安全承诺；unknown 状态机与补偿失效机制单独走 0.2.0。** 本记录满足发布前条件：实际
 diff 可审阅（补丁路径见文末）、行为变化明确、两个 FAIL 缺口显著声明并接受、最终产物
