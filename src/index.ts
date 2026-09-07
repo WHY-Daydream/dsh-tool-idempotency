@@ -90,6 +90,53 @@ function idempotencyError(message: string, code: string, errorName: string): Too
   }
 }
 
+/** Rejection carried by a joiner that leaves early because its own signal aborted. */
+class JoinerAbortedError extends Error {
+  constructor() {
+    super('idempotency join aborted by caller signal')
+    this.name = 'JoinerAbortedError'
+  }
+}
+
+/**
+ * Join an in-flight execution, but leave promptly when the joiner's own signal
+ * aborts — without cancelling the owner or touching the store (settlement stays
+ * owner-scoped). Matches ARCHITECTURE §④: an in-flight waiter that is aborted
+ * should abandon the wait instead of hanging the cancelled turn.
+ */
+function joinExecution(
+  ownerPromise: Promise<ToolExecutionResult>,
+  signal: AbortSignal | undefined,
+): Promise<ToolExecutionResult> {
+  if (signal === undefined || signal.aborted) {
+    return Promise.reject(new JoinerAbortedError())
+  }
+  return new Promise<ToolExecutionResult>((resolve, reject) => {
+    let settled = false
+    const onAbort = (): void => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', onAbort)
+      reject(new JoinerAbortedError())
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    ownerPromise.then(
+      (result) => {
+        if (settled) return
+        settled = true
+        signal.removeEventListener('abort', onAbort)
+        resolve(result)
+      },
+      (error: unknown) => {
+        if (settled) return
+        settled = true
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
+}
+
 /** A rule compiled for matching. */
 interface CompiledRule {
   regex: RegExp
@@ -143,7 +190,9 @@ export function apply(ctx: Context, config: Config): void {
           'IdempotencyKeyMismatch',
         )
       }
-      return existing.promise as Promise<ToolExecutionResult>
+      // Abort-aware join: leave promptly if this caller's signal aborts while
+      // the owner is still running — never cancel the owner or touch the store.
+      return joinExecution(existing.promise as Promise<ToolExecutionResult>, exec.signal)
     }
 
     if (existing !== undefined && existing.state === 'succeeded') {

@@ -1,12 +1,14 @@
 name: npm-publish
 
 # 发布 @why-daydream/dsh-tool-idempotency 到 npm。
-# lib/ 是已提交的构建产物（.gitignore 已移除），runner 无需安装依赖或构建；
-# devDependencies 中的 link: 本地路径仅供开发使用，`npm publish` 不触碰它们。
+# 门禁（2026-09-07 代码评审修订）：发布**打包出来的同一份 tgz**（npm publish <tgz>），
+# 而不是裸 `npm publish` 重打包工作目录；发布后从 registry 复验 dist.integrity 与本地
+# 打包产物一致。lib/ 是已提交构建产物，runner 无需安装依赖或构建；devDependencies 中
+# 的 link: 本地路径仅供开发使用，发布流程不触碰它们。
 on:
-  workflow_dispatch: # 手动触发：当前 v0.1.0 的 tag 已存在，需在 Actions 页点击 Run workflow
+  workflow_dispatch: # 手动触发
   push:
-    tags: ['v*'] # 未来版本：推送 v* tag 时自动发布
+    tags: ['v*'] # 推送 v* tag 时自动发布
 
 jobs:
   publish:
@@ -21,10 +23,25 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
-      - name: 校验发布物
-        run: npm pack --dry-run
+      - name: 打包并记录产物（同一份 tgz 将用于发布与复验）
+        run: |
+          npm pack --json > pack.json
+          TGZ=$(node -e "const f=JSON.parse(require('fs').readFileSync('pack.json'))[0];console.log(f.filename)")
+          echo "TGZ=$TGZ" >> "$GITHUB_ENV"
+          echo "packed=$TGZ"
+          sha256sum "$TGZ" | tee tgz-packed.sha256
 
-      - name: 发布到 npm
-        run: npm publish
+      - name: 发布这份 tgz（不得另行重建）
+        run: npm publish "./${TGZ}" --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: 发布后复验（registry 产物 == 发布的 tgz）
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          LOCAL_INTEGRITY=$(node -e "console.log(JSON.parse(require('fs').readFileSync('pack.json'))[0].integrity)")
+          REG_INTEGRITY=$(npm view "@why-daydream/dsh-tool-idempotency@${VERSION}" dist.integrity)
+          echo "local integrity : $LOCAL_INTEGRITY"
+          echo "registry        : $REG_INTEGRITY"
+          test "$LOCAL_INTEGRITY" = "$REG_INTEGRITY" && echo "OK: registry dist.integrity matches the published tgz"
+          sha256sum "${TGZ}"

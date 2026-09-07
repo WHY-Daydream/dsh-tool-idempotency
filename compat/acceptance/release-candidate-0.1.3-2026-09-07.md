@@ -26,8 +26,14 @@ diff 可审阅（补丁路径见文末）、行为变化明确、两个 FAIL 缺
 ## 验收状态（最终 0.1.3 同一份 tgz 实测）
 
 产物：`why-daydream-dsh-tool-idempotency-0.1.3.tgz`
-SHA-256：`ecd3189fcc318f59c3158f79ca1ece10bbfe2ef7a6803f77f073156913d2fd7b`
-（`compat/acceptance/tgz-0.1.3.sha256`；13 文件，files 白名单合规，无 src/tests 泄漏）
+SHA-256：`06b6ee245fe5b8ec838f80f90883f7ce2b0c5acf9219c51f273b32a3ecf41fb0`
+（`compat/acceptance/tgz-0.1.3.sha256`；13 文件，files 白名单合规，无 src/tests 泄漏；
+`exports` 已移除 `./src/*`）
+
+> 修订记录：本记录在 commit 631cc44 代码评审后更新——四项意见（P1-1 abort-aware
+> join 与取消屏障、P1-2 同 tgz 发布门禁、P2-3 三态输出与 Saga 精确断言、P2-4 移除
+> 无效 exports）全部处理并复验；产物 SHA 随 exports/lib 变更重生成。详见
+> `acceptance-c-2026-09-07.md`「评审修订轮」与 `CHANGELOG.md`。
 
 | 验收 | 结果 |
 | --- | --- |
@@ -57,20 +63,20 @@ SHA-256：`ecd3189fcc318f59c3158f79ca1ece10bbfe2ef7a6803f77f073156913d2fd7b`
 npm run typecheck:tests && npm run typecheck && npm run build
 npm run test:p0 && npm run test:unit && npm run test:e2e
 
-# 2. 打包（同 tgz 发布门禁：不得测试后另行重建）
+# 2. 打包（发布门禁：发布**已验收的那一份 tgz**，禁止测试后另行重建）
 npm pack --json            # 产出 why-daydream-dsh-tool-idempotency-0.1.3.tgz
-sha256sum why-daydream-dsh-tool-idempotency-0.1.3.tgz   # 应等于 ecd3189f…
+sha256sum -c compat/acceptance/tgz-0.1.3.sha256   # 必须与验收归档一致；产物内容变化时先重生成并复验
 
-# 3. 发布（发布这份 tgz 的等价内容 = npm publish）
-npm publish --access public
+# 3. 发布（显式发布已验收的同一份 tgz，不是裸 npm publish 重打包工作目录）
+npm publish ./compat/acceptance/why-daydream-dsh-tool-idempotency-0.1.3.tgz --access public
 
-# 4. 发布后下载复验（关键：registry 下载的包必须与测试/发布一致）
+# 4. 发布后下载复验（必须含哈希比对与去重冒烟，不能只验证入口加载）
 cd /tmp && rm -rf postpub && mkdir postpub && cd postpub && npm init -y
-npm install @why-daydream/dsh-tool-idempotency@0.1.3 \
-  @deepseek-ai/cordis@4.0.2 @deepseek-ai/dsh-tools@0.1.2-rc.1 \
-  @deepseek-ai/dsh-invariants@0.1.2-rc.1 @deepseek-ai/dsh-system-prompt@0.1.2-rc.1
-node --input-type=module -e "import('@why-daydream/dsh-tool-idempotency').then(m=>{console.log('loaded',m.name,typeof m.apply);process.exit(m.name==='tool-idempotency'?0:1)})"
-# 期望：加载成功 + 去重冒烟（对同一工具两次调用，副作用 1 次）
+npm install @why-daydream/dsh-tool-idempotency@0.1.3
+npm pack "@why-daydream/dsh-tool-idempotency@0.1.3"   # 从 registry 下载的包
+sha256sum why-daydream-dsh-tool-idempotency-0.1.3.tgz # 必须等于 compat/acceptance/tgz-0.1.3.sha256
+# 去重冒烟：装好 peer 闭包后对同一工具调用两次 → 副作用 1 次（脚本见 compat/fixtures/current-latest/agent-e2e.mjs）
+npm view "@why-daydream/dsh-tool-idempotency@0.1.3" dist.integrity  # 与发布前 npm pack 的 integrity 一致
 ```
 
 ## 审阅入口

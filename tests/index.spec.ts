@@ -56,7 +56,12 @@ function registerTool(ctx: Context, name: string, body: () => ContentBlock[] | P
 }
 
 /** Dispatch one tool call through the real pipeline. */
-async function executeTool(ctx: Context, name: string, argumentsValue: Record<string, unknown>): Promise<unknown> {
+async function executeTool(
+  ctx: Context,
+  name: string,
+  argumentsValue: Record<string, unknown>,
+  signal: AbortSignal = testToolSignal,
+): Promise<unknown> {
   return ctx.tools.execute({
     callId: await brandCallId(nextCallId()),
     name,
@@ -64,7 +69,7 @@ async function executeTool(ctx: Context, name: string, argumentsValue: Record<st
     // baseline, not in 0.1.2-rc.1+ (PCA F2c) — the erased `never` cast keeps this
     // suite compiling against both; the runtime value is unaffected.
     arguments: argumentsValue as unknown as never,
-    signal: testToolSignal,
+    signal,
   })
 }
 
@@ -75,6 +80,15 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
     resolve = res
   })
   return { promise, resolve }
+}
+
+/** Poll until `predicate` holds (deterministic readiness barrier for cancel tests). */
+async function until(predicate: () => boolean, timeoutMs = 300): Promise<void> {
+  const start = Date.now()
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) throw new Error('until(...) timed out')
+    await new Promise((resolve) => setTimeout(resolve, 1))
+  }
 }
 
 describe('opt-in gating', () => {
@@ -428,5 +442,46 @@ describe('P0 regression — own __proto__ argument fields are distinct requests'
     const r3 = await executeTool(ctx, 'create_order', withProto)
     expect(attempts).toBe(2)
     expect(r3).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
+  })
+})
+
+describe('P0 regression — an aborted waiter leaves the join promptly', () => {
+  it('aborting the waiter while the owner runs does not cancel the owner or fork the side effect', async () => {
+    let attempts = 0
+    const gate = deferred<ContentBlock[]>()
+    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
+    registerTool(ctx, 'create_order', async () => {
+      attempts += 1
+      return gate.promise
+    })
+
+    const ownerCtrl = new AbortController()
+    const waiterCtrl = new AbortController()
+    const owner = executeTool(ctx, 'create_order', { orderId: 'a' }, ownerCtrl.signal)
+    await until(() => attempts === 1) // owner 已启动并持有执行锁
+    const waiter = executeTool(ctx, 'create_order', { orderId: 'a' }, waiterCtrl.signal) // join
+    await until(() => waiterCtrl.signal.aborted === false) // 仅确保信号未预取消
+    await new Promise((resolve) => setTimeout(resolve, 10)) // 让 waiter 的 dispatch 进入 guard join 分支
+    waiterCtrl.abort()
+
+    // waiter 必须独立退出（owner 仍未完成）：加入超时护栏，防止回归为永久挂起
+    const outcome = await Promise.race([
+      waiter.then(
+        (value) => ({ kind: 'resolve' as const, isError: (value as { isError?: boolean })?.isError ?? false }),
+        () => ({ kind: 'reject' as const, isError: false }),
+      ),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('waiter did not leave within 300ms')), 300)),
+    ])
+    expect(attempts).toBe(1) // waiter 离开不影响 owner；无重复执行
+
+    gate.resolve([{ type: 'text', text: 'order-1' }])
+    const ownerResult = await owner
+    expect(ownerResult).toMatchObject({ isError: false })
+    expect(attempts).toBe(1)
+
+    // owner 完成后，同 key 调用正常重放（无僵尸锁、无串用）
+    const replay = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(replay).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
+    expect(['resolve', 'reject']).toContain(outcome.kind) // 本地宿主可能把早期退出映射为 isError 或传播 rejection
   })
 })

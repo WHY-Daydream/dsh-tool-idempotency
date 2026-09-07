@@ -28,6 +28,21 @@
   在途容量打满显式拒绝。验收：两条 npm 轨道（0.1.2-rc.1 / 0.1.1-rc.2）14/14 幂等回归、
   基础 Agent E2E（副作用一次）、C3 正确性断言 4/4（详见 acceptance-b/c）。
 
+### 评审修订（2026-09-07，commit 631cc44 之后，均验证通过）
+
+- **[P1-1] abort-aware join**：join 中的 waiter 收到自身 `exec.signal` abort 时**独立退出**
+  （返回由宿主映射的 isError 结果），不取消 owner、不触碰 store——实现 ARCHITECTURE §④
+  「等待方收到 abort 应放弃等待」既定语义（此前实现缺失，会挂到 owner 完成）。c3 取消
+  场景改用 started/joined 屏障 + 超时护栏，本地单元 + registry 闭包均 PASS。
+- **[P1-2] 同 tgz 发布门禁**：发布命令改为 `npm publish ./…tgz`（已验收的同一份归档，
+  禁止裸 publish 重打包）；`.github/workflows/npm-publish.yml` 同步为打包→发布同一
+  tgz→registry `dist.integrity` 复验；发布后下载复验含 sha256 比对与去重冒烟。
+- **[P2-3] 三态验收输出**：c3 套件输出 `PASS / KNOWN_DEFECT_REPRODUCED / FAIL`；
+  Saga 场景补精确断言。最终结果 PASS=3、KNOWN_DEFECT_REPRODUCED=3（K1×2：提交后
+  abort、owner 提交后取消；K2：Saga 补偿后重放）、FAIL=0。
+- **[P2-4] 移除无效 exports**：删除 `exports["./src/*"]`（原指向未发布 src，消费者导入
+  ERR_MODULE_NOT_FOUND）。
+
 ### 已知限制（本版接受，显著声明）
 
 - **unknown**：副作用已提交但响应丢失/超时后，重试会再次执行（effects=2，FAIL 复现

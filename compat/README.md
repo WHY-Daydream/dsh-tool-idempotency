@@ -84,8 +84,8 @@ npm install <同一份 tgz> <DSH 精确闭包版本…>   # strict 安装，不�
   `@why-daydream/dsh-tool-idempotency/invariant`（`./invariant`）、`./package.json`。
 - **内部文件（未在 exports 公开，不得要求消费者导入）**：`canonicalize`、`stores` 等
   仅需核验：打包包含该文件（files 白名单）且主入口运行时内部加载成功——不能把它们当
-  作消费者导入面测试。`exports["./src/*"]` 指向未发布的 src（files 不含 src），属已知
-  声明问题，不构成消费者可导入路径。
+  作消费者导入面测试。`exports["./src/*"]` 已在 0.1.3 修订中**移除**（原映射指向未发布
+  的 src，消费者导入会 ERR_MODULE_NOT_FOUND）。
 
 ## 打包边界说明（2026-09-07 复核修订）
 

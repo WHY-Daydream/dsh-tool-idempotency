@@ -97,6 +97,32 @@ mismatch（已完成 + 并发）/ 并发 join / 抛错重试 / TTL 过期重执�
 - 本地 dev 宿主（0.1.0-rc.5 线）上的 chaos+transaction E2E（Scenario B Saga）PASS
   （B 阶段 test:e2e 2/2）。
 
+## 评审修订轮（commit 631cc44 之后，2026-09-07）— 以本节结果为准
+
+四项评审意见全部处理并复验，最终 0.1.3 归档产物 SHA-256 更新为
+`06b6ee245fe5b8ec838f80f90883f7ce2b0c5acf9219c51f273b32a3ecf41fb0`
+（`compat/acceptance/tgz-0.1.3.sha256`，13 文件，exports 已移除 `./src/*`）。
+
+- **[P1-1] waiter 取消真实进入 join 后验证 + 独立退出已实现**：`src/index.ts` 新增
+  abort-aware join（`joinExecution`）——waiter 收到自身 signal abort 时立即以
+  `JoinerAbortedError` 退出（registry 闭包实测映射为 isError 结果），owner 与缓存不受
+  影响；此前实现缺失（waiter 挂到 owner 完成），评审实测复现并已修复。c3 取消场景用
+  started/joined 屏障 + 400ms 退出护栏；本地单元 69/69（含新增 waiter-abort 用例）。
+- **[P2-3] c3 三态输出（最终结果，registry 0.1.2-rc.1 闭包，新 tgz 重装后实测）**：
+  `C3_SCENARIOS PASS=3 KNOWN_DEFECT_REPRODUCED=3 FAIL=0`，退出码 0。
+  - PASS：结构化重放 / waiter 取消（独立退出）/ 提交前 abort（协作，单次提交）
+  - KNOWN_DEFECT_REPRODUCED K1×2：提交后 abort（effects=2）；**owner 提交后被取消**
+    （registry 将已完成但已取消的结果映射为 aborted → 插件不缓存 → 重试重执行，
+    attempts=2，K1 族新复现路径）
+  - KNOWN_DEFECT_REPRODUCED K2：Saga 补偿后同 key 重放旧成功结果（creates=1、内容含
+    `(#1)`，精确断言）
+- **[P2-4] exports 移除 `./src/*`**：package.json 不再声明该无效映射。
+- 发布门禁修订（[P1-2]）：见 `release-candidate-0.1.3-2026-09-07.md` 与
+  `.github/workflows/npm-publish.yml`（同 tgz 发布 + registry integrity 复验）。
+
+上一节 C3 的旧分账（“正确性断言 4 PASS / 缺陷复现 2 FAIL”）描述的是 631cc44 时的
+覆盖口径；本节对取消语义补强与分类后以其为准。
+
 ## C4 兼容矩阵（逐项状态）
 
 | 轨道 | 目标 | 状态 | 证据 |
