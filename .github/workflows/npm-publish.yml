@@ -10,6 +10,8 @@ name: npm-publish
 #     tgz 内部的 name/version**（tar 读取 package/package.json，失败即停）。
 #  3. tag 触发时，发布前额外校验 tag 版本 == package.json 版本，不一致立即失败。
 #  4. 发布后复验：registry dist.integrity == 归档 tgz 的 sha512-integrity。
+#  5. 同版本已存在于 registry 且 dist.integrity 与归档一致 → 跳过发布（tag 补推/重放避免
+#     E403）；版本已存在但 integrity 不一致 → 立即失败（不得覆盖、不得静默跳过）。
 on:
   workflow_dispatch: # 手动触发（发布 compat/acceptance 中已验收归档）
   push:
@@ -64,7 +66,24 @@ jobs:
         run: |
           sha256sum -c "tgz-${PKG_VERSION}.sha256"
 
+      - name: registry 同版本已存在且 integrity 与归档一致 → 跳过发布（避免 E403）
+        id: registry-check
+        run: |
+          LOCAL_INTEGRITY="sha512-$(openssl dgst -sha512 -binary "compat/acceptance/why-daydream-dsh-tool-idempotency-${PKG_VERSION}.tgz" | openssl base64 -A)"
+          if REG_INTEGRITY=$(npm view "@why-daydream/dsh-tool-idempotency@${PKG_VERSION}" dist.integrity 2>/dev/null); then
+            if [ "$REG_INTEGRITY" = "$LOCAL_INTEGRITY" ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "OK: registry 已存在 ${PKG_VERSION} 且 dist.integrity 与归档一致，跳过发布"
+            else
+              echo "ERROR: registry 已存在 ${PKG_VERSION} 但 dist.integrity 与归档不一致（阻止发布，需人工核查）" >&2
+              exit 1
+            fi
+          else
+            echo "OK: registry 尚无 ${PKG_VERSION}，继续发布"
+          fi
+
       - name: 发布这份已验收归档（不重打包工作目录）
+        if: steps.registry-check.outputs.skip != 'true'
         working-directory: compat/acceptance
         run: npm publish "./why-daydream-dsh-tool-idempotency-${PKG_VERSION}.tgz" --access public
         env:
