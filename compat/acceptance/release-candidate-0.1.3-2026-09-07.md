@@ -40,6 +40,9 @@ SHA-256：`06b6ee245fe5b8ec838f80f90883f7ce2b0c5acf9219c51f273b32a3ecf41fb0`
 > package.json 并核验归档存在，tag 触发时发布前校验 tag==版本，发布后 integrity
 > 复验用同一版本号；c3 joined 屏障事件化（探针 + 微任务，替代 sleep）。发布包内容
 > 未变，SHA 保持 `06b6ee24…`。
+>
+> 修订记录 3（round 3，非阻塞）：workflow 注释改为“版本解析自仓库 package.json”，
+> 新增归档内部 name/version 显式比对步骤（失败即停）。发布包内容仍未变。
 
 | 验收 | 结果 |
 | --- | --- |

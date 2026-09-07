@@ -137,6 +137,9 @@ mismatch（已完成 + 并发）/ 并发 join / 抛错重试 / TTL 过期重执�
   `ctx.on('tools/execute')` 透传探针（按 signal 识别），gate 续体在微任务中执行 →
   触发 abort 时 waiter 必然已进入 join 分支；移除 `sleep(25)` 与轮询。重跑实测
   `C3_SCENARIOS PASS=3 KNOWN_DEFECT_REPRODUCED=3 FAIL=0`（退出码 0）。
+- **workflow 补充（round 3，非阻塞）**：注释修正为“版本解析自仓库 package.json”，
+  并新增**归档内部 name/version 显式比对**步骤（`tar -xzf <tgz> -O package/package.json`
+  读取后与仓库比对，不一致即停），消除“版本取自 tgz”的表述歧义。
 
 ## C4 兼容矩阵（逐项状态）
 
