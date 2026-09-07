@@ -24,7 +24,10 @@
 | registry 0.1.2-rc.1 线 | cordis `4.0.2`；dsh-tools / invariants / system-prompt / session / llm / agent-loop / agent-loop-testkit / timeout-policy `0.1.2-rc.1` | `compat/fixtures/current-latest/`（npm ci + `package-lock.json`） | 已测两条 npm 版本线之一 |
 | registry 0.1.1-rc.2 线 | cordis `4.0.1`；dsh-* `0.1.1-rc.2` | `compat/fixtures/prev-release-0.1.1-rc.2/`（npm ci + `package-lock.json`） | 已测两条 npm 版本线之二 |
 
-组合插件（本地 link）：`@why-daydream/dsh-chaos` `0.1.0`、`@why-daydream/dsh-tool-transaction` `0.1.0`。
+组合插件（本地 link，提交已固定）：`@why-daydream/dsh-chaos` `0.1.0`（git `01130b5`）、
+`@why-daydream/dsh-tool-transaction` `0.1.0`（git `3cb9391`）、
+`@why-daydream/dsh-tool-bulkhead` `0.1.1`（git `c134237`）；
+DSH 主干工作副本 `deepseek-harness@47f943859b`（0.1.0-rc.5 线，见 `targets.lock.json` sourceTracks）。
 
 ## 3. 依赖锁文件
 

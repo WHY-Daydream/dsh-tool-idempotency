@@ -94,3 +94,33 @@ npm install <同一份 tgz> <DSH 精确闭包版本…>   # strict 安装，不�
 - 发布前用 `npm pack --json` 的 `files` 清单复核白名单（13 项，见验收记录）；`npm run
   build` 后 `git status` 应显示 lib/ 重建差异——本会话 lib 已含 memory.ts 修复后重新
   构建，tgz SHA-256 见验收记录。
+
+## 0.2.0 候选验收 fixture（2026-09-07）
+
+| fixture | 宿主闭包 | 插件 | 状态 |
+| --- | --- | --- | --- |
+| `compat/fixtures/current-latest-0.2.0/` | registry 0.1.2-rc.1 线（cordis 4.0.2 + dsh-* 0.1.2-rc.1） | 0.2.0 候选 tgz | 归档运行验证通过；**干净安装 BLOCKED（网络，registry tarball 超时）** |
+| `compat/fixtures/prev-release-0.1.1-rc.2-0.2.0/` | registry 0.1.1-rc.2 线 | 0.2.0 候选 tgz | 归档运行验证通过；**干净安装 BLOCKED（同上）** |
+
+归档运行验证 = 复用已验收宿主闭包 + 候选 tgz 解包（等价 file: 安装内容），脚本内置
+版本校验（加载版本 !== 0.2.0 即失败）。**不等于干净安装验收。**
+
+**干净安装（网络恢复后，全新目录 `npm ci`，不复用 node_modules；同一份候选 tgz）：**
+
+```bash
+# 1) 生成/更新锁文件（仅 registry 元数据，不下载 tarball）
+cd compat/fixtures/current-latest-0.2.0 && npm install --package-lock-only --no-audit --no-fund
+cd compat/fixtures/prev-release-0.1.1-rc.2-0.2.0 && npm install --package-lock-only --no-audit --no-fund
+
+# 2) 全新目录严格安装 + 全量重跑（脚本内置 [VERSION] plugin loaded = 0.2.0 校验）
+cd compat/fixtures/current-latest-0.2.0 \
+  && npm ci \
+  && node baseline.mjs && node regression.mjs && node structured-result.mjs \
+  && node c3-scenarios-0.2.0.mjs && node agent-e2e.mjs
+cd compat/fixtures/prev-release-0.1.1-rc.2-0.2.0 \
+  && npm ci \
+  && node baseline.mjs && node regression.mjs
+
+# 3) 归档哈希复验（发布门禁同一命令）
+cd compat/acceptance && sha256sum -c tgz-0.2.0.sha256 && sha256sum -c deliverables-0.2.0.sha256
+```

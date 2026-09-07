@@ -12,7 +12,7 @@ import { type ContentBlock } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import * as Idempotency from '../../src/index.js'
-import type { Config } from '../../src/index.js'
+import type { Config, ToolIdempotencyApi } from '../../src/index.js'
 
 // 模块内共享的默认信号（不导出：导出会把 @types/node 的 AbortSignal 类型引入
 // 声明命名上下文，触发 TS4023；与 tests/index.spec.ts 的约定一致）。
@@ -105,4 +105,9 @@ export async function until(predicate: () => boolean, timeoutMs = 300): Promise<
 /** 短暂让出事件循环（仅用于推进微任务/宏任务队列，不充当时序保证）。 */
 export function tick(ms = 10): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** 0.2.0 状态接口（ctx.provide('toolIdempotency') 挂载的服务）。 */
+export function idempotencyApi(ctx: Context): ToolIdempotencyApi {
+  return ctx.get('toolIdempotency') as ToolIdempotencyApi
 }

@@ -13,11 +13,14 @@
  * - settlements are owner-scoped: stale owners cannot delete or overwrite;
  * - TTL governs the succeeded cache only, never an in-flight lock;
  * - `delete` invalidates the cache but never touches a live lock.
+ *
+ * 0.2.0 契约补充：无提交证据的错误 → unknown 墓碑（重试被阻止，release/confirm 解除）；
+ * 带 NOT_COMMITTED 证据 → failed_safe（释放且不留记录，重试允许）。
  */
 
 import { describe, expect, it } from 'vitest'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
-import { MemoryStore } from '../src/stores/memory.js'
+import { MemoryStore, NOT_COMMITTED_CODE } from '../src/stores/memory.js'
 
 function okResult(n: number): ToolExecutionResult {
   return { isError: false, content: [{ type: 'text', text: `ok-${n}` }] } as unknown as ToolExecutionResult
@@ -25,6 +28,15 @@ function okResult(n: number): ToolExecutionResult {
 
 function errResult(): ToolExecutionResult {
   return { isError: true, content: [{ type: 'text', text: 'boom' }] } as unknown as ToolExecutionResult
+}
+
+/** 带「确定未提交」证据的错误结果（failed_safe 路径）。 */
+function notCommittedResult(): ToolExecutionResult {
+  return {
+    isError: true,
+    content: [{ type: 'text', text: 'boom' }],
+    error: { message: 'not committed', info: { name: 'NotCommitted', code: NOT_COMMITTED_CODE } },
+  } as unknown as ToolExecutionResult
 }
 
 describe('MemoryStore P0 — in-flight locks survive cache capacity', () => {
@@ -128,7 +140,9 @@ describe('MemoryStore P0 — owner-scoped settlements', () => {
     expect(first).not.toBeNull()
     first!.promise.catch(() => undefined) // the first owner is failed below
     store.fail('K', first!.owner, new Error('boom-1'))
-    expect(store.get('K')).toBeUndefined() // retry may claim again
+    expect(store.get('K')?.state).toBe('unknown') // 0.2.0：无提交证据的失败 → unknown（重试被阻止）
+    store.release('K') // 对账解除 → 可重新执行
+    expect(store.get('K')).toBeUndefined()
 
     const second = store.reserve('K', 'fp-k')
     expect(second).not.toBeNull()
@@ -155,25 +169,34 @@ describe('MemoryStore P0 — owner-scoped settlements', () => {
     expect(store.get('K')?.result).toBe(done)
   })
 
-  it('error results release the lock for retry without caching', () => {
+  it('error results: NOT_COMMITTED evidence releases without a record; plain errors → unknown tombstone', () => {
     const store = new MemoryStore(5, 5)
-    const r = store.reserve('K', 'fp-k')
-    expect(r).not.toBeNull()
-    store.settle('K', r!.owner, errResult(), 1000)
-    expect(store.get('K')).toBeUndefined() // retry must re-execute
 
-    const again = store.reserve('K', 'fp-k')
-    expect(again).not.toBeNull()
-    expect(store.size).toBe(1)
-    store.settle('K', again!.owner, okResult(1), 1000)
-    expect(store.get('K')?.state).toBe('succeeded')
+    // failed_safe：带 NOT_COMMITTED 证据 → 释放且不留记录，重试允许重新执行
+    const r1 = store.reserve('K1', 'fp-1')
+    expect(r1).not.toBeNull()
+    store.settle('K1', r1!.owner, notCommittedResult(), 1000)
+    expect(store.get('K1')).toBeUndefined()
+    const again1 = store.reserve('K1', 'fp-1')
+    expect(again1).not.toBeNull()
+    store.settle('K1', again1!.owner, okResult(1), 1000)
+    expect(store.get('K1')?.state).toBe('succeeded')
+
+    // 无提交证据的错误 → unknown 墓碑（重试被阻止；release/confirm 解除）
+    const r2 = store.reserve('K2', 'fp-2')
+    expect(r2).not.toBeNull()
+    store.settle('K2', r2!.owner, errResult(), 1000)
+    expect(store.get('K2')?.state).toBe('unknown')
+    expect(store.get('K2')?.fingerprint).toBe('fp-2')
+    store.release('K2')
+    expect(store.get('K2')).toBeUndefined()
   })
 })
 
 describe('MemoryStore P0 — TTL and delete boundaries', () => {
   it('TTL governs the succeeded cache only, never an in-flight lock', () => {
     let now = 1000
-    const store = new MemoryStore(10, 10, () => now)
+    const store = new MemoryStore(10, 10, 10, () => now)
     const r = store.reserve('K', 'fp-k')
     expect(r).not.toBeNull()
     now = 2 ** 40 // arbitrarily far future
@@ -207,5 +230,134 @@ describe('MemoryStore constructor validation', () => {
 
   it('rejects a non-positive maxInFlight', () => {
     expect(() => new MemoryStore(1, 0)).toThrow(/maxInFlight/)
+  })
+})
+
+describe('MemoryStore 0.2.0 — unknown 墓碑与 failed_safe 证据（store 层契约）', () => {
+  it('fail() 抛错携带 NOT_COMMITTED 证据 → failed_safe：不留墓碑，重试可重新执行', () => {
+    const store = new MemoryStore(2)
+    const r = store.reserve('K', 'fp-k')
+    expect(r).not.toBeNull()
+    store.fail('K', r!.owner, { info: { name: 'NotCommitted', code: NOT_COMMITTED_CODE } })
+    expect(store.get('K')).toBeUndefined() // 无墓碑
+    expect(store.size).toBe(0)
+  })
+
+  it('fail() 无证据抛错 → unknown 墓碑：重试 blocked，容量压力不淘汰墓碑', () => {
+    const store = new MemoryStore(2) // maxEntries=2：墓碑豁免容量淘汰
+    for (let i = 0; i < 5; i++) {
+      const r = store.reserve(`K${i}`, `fp-${i}`)
+      store.fail(`K${i}`, r!.owner, new Error('boom'))
+    }
+    for (let i = 0; i < 5; i++) {
+      expect(store.get(`K${i}`)?.state).toBe('unknown')
+    }
+    expect(store.size).toBe(5) // 5 个墓碑全部保留（超过 maxEntries 也不淘汰）
+
+    store.release('K0')
+    expect(store.get('K0')).toBeUndefined() // 显式 release 是唯一解除路径
+    expect(store.get('K1')?.state).toBe('unknown') // 其余仍 blocked
+    expect(store.size).toBe(4)
+  })
+
+  it('release() 递增代次：陈旧 owner fail 不写回 unknown', () => {
+    const store = new MemoryStore(4)
+    const r = store.reserve('K', 'fp-k')
+    expect(r).not.toBeNull()
+    store.release('K') // 代次 → 2
+    store.fail('K', r!.owner, new Error('late boom'))
+    expect(store.get('K')).toBeUndefined() // 无墓碑写回
+    expect(store.size).toBe(0)
+  })
+
+  it('墓碑预算：满时 reserve 前置拒绝（不淘汰旧墓碑），release 对账后恢复', () => {
+    const store = new MemoryStore(4, 4, 2) // maxUnknown = 2
+    const a = store.reserve('A', 'fp-a')
+    store.fail('A', a!.owner, new Error('x'))
+    const b = store.reserve('B', 'fp-b')
+    store.fail('B', b!.owner, new Error('x'))
+    expect(store.get('A')?.state).toBe('unknown')
+    expect(store.get('B')?.state).toBe('unknown')
+    expect(store.unknownFull).toBe(true)
+
+    // 满时新 key 前置拒绝：不执行、不淘汰旧墓碑
+    expect(store.reserve('C', 'fp-c')).toBeNull()
+    expect(store.get('A')?.state).toBe('unknown') // 历史 unknown 不被绕过
+    expect(store.get('B')?.state).toBe('unknown')
+    expect(store.size).toBe(2)
+
+    // 对账 release 一个 → 恢复可执行；再失败仍有位置记录 unknown
+    store.release('A')
+    expect(store.unknownFull).toBe(false)
+    const c = store.reserve('C', 'fp-c')
+    expect(c).not.toBeNull()
+    store.fail('C', c!.owner, new Error('x'))
+    expect(store.get('C')?.state).toBe('unknown')
+    expect(store.get('B')?.state).toBe('unknown') // 历史墓碑仍在
+    expect(store.size).toBe(2)
+
+    // confirm 同样释放预算
+    store.confirm('C', 'fp-c', okResult(1), 1000)
+    expect(store.get('C')?.state).toBe('succeeded')
+    const d = store.reserve('D', 'fp-d')
+    expect(d).not.toBeNull()
+    store.settle('D', d!.owner, okResult(1), 1000)
+    expect(store.size).toBe(3) // B(unknown) + C(succeeded) + D(succeeded)
+  })
+
+  it('rejects a non-positive maxUnknown', () => {
+    expect(() => new MemoryStore(1, 1, 0)).toThrow(/maxUnknown/)
+  })
+
+  it('并发预留口径：maxUnknown=2 时同时在途（可能进 unknown）≤2，全部失败后墓碑不突破预算', () => {
+    const store = new MemoryStore(10, 10, 2) // maxUnknown=2
+    const a = store.reserve('A', 'fp-a')
+    const b = store.reserve('B', 'fp-b')
+    expect(a).not.toBeNull()
+    expect(b).not.toBeNull()
+    // 第 3 个：unknown=0 + executing=2 >= maxUnknown=2 → 前置拒绝（预留计数，
+    // 而非等失败后才「发现没有位置」）
+    expect(store.reserve('C', 'fp-c')).toBeNull()
+    expect(store.unknownFull).toBe(true) // 与 reserve 同口径
+
+    // 并发全部失败 → unknown=2 == maxUnknown，不突破
+    store.fail('A', a!.owner, new Error('x'))
+    store.fail('B', b!.owner, new Error('x'))
+    expect(store.get('A')?.state).toBe('unknown')
+    expect(store.get('B')?.state).toBe('unknown')
+    expect(store.size).toBe(2)
+
+    // 对账 release 一个 → 恢复；再失败仍不突破
+    store.release('A')
+    expect(store.unknownFull).toBe(false)
+    const c = store.reserve('C', 'fp-c')
+    expect(c).not.toBeNull()
+    store.fail('C', c!.owner, new Error('x'))
+    expect(store.get('C')?.state).toBe('unknown')
+    expect(store.get('B')?.state).toBe('unknown') // 历史墓碑不被绕过
+    expect(store.size).toBe(2)
+  })
+
+  it('成功释放预留：一个成功一个失败 → 成功不占墓碑预算（succeeded≠unknown），预算正确', () => {
+    const store = new MemoryStore(10, 10, 2)
+    const a = store.reserve('A', 'fp-a')
+    const b = store.reserve('B', 'fp-b')
+    store.settle('A', a!.owner, okResult(1), 1000) // 成功 → succeeded（不占墓碑预算）
+    store.fail('B', b!.owner, new Error('x')) // 失败 → unknown=1
+    expect(store.get('A')?.state).toBe('succeeded')
+    expect(store.get('B')?.state).toBe('unknown')
+
+    // unknown=1 + executing=0 < 2 → 新 key 可执行；若失败则 unknown=2，仍不突破
+    const c = store.reserve('C', 'fp-c')
+    expect(c).not.toBeNull()
+    store.fail('C', c!.owner, new Error('x'))
+    expect(store.get('C')?.state).toBe('unknown')
+    expect(store.get('A')?.state).toBe('succeeded') // 成功结果仍在
+
+    // 现在 unknown=2 == maxUnknown → 第 4 个被前置拒绝
+    expect(store.reserve('D', 'fp-d')).toBeNull()
+    store.release('B')
+    const d = store.reserve('D', 'fp-d')
+    expect(d).not.toBeNull()
   })
 })

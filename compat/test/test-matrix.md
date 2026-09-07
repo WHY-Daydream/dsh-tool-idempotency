@@ -65,7 +65,7 @@ node compat/test/run-all.mjs
 | 方向 | 必测场景 | 验收标准 | 状态 |
 | --- | --- | --- | --- |
 | 请求隔离 | 相同 key 跨工具、Agent、session、工作区 | 按声明作用域隔离，不串用结果 | **PASS**（7/7，request-isolation.spec.ts） |
-| 参数判等 | 特殊 JSON 字段、嵌套参数、数组顺序、模拟哈希碰撞 | 不同请求不能错误合并 | **PASS（含已知限制实证）**（9/9，argument-equality.spec.ts） |
+| 参数判等 | 特殊 JSON 字段、嵌套参数、数组顺序、模拟哈希碰撞 | 不同请求不能错误合并 | **PASS（O1 已修复，见 §11.3）**（9/9，argument-equality.spec.ts） |
 | 取消与异常 | owner/waiter 取消、同步抛错、下游挂起 | waiter 可退出、owner 状态正确、无错误释放锁 | **PASS**（5/5，cancel-abort.spec.ts） |
 | 结果重放 | value、多模态内容、实际支持的附加字段 | 保留应重放内容，不复制错误身份/一次性上下文 | **PASS**（6/6，replay-fidelity.spec.ts；meta/additionalContexts 未覆盖=NOT_RUN 附注） |
 | 权限变化 | 首次允许，重试时权限被撤销 | 缓存命中不能绕过当前权限检查 | **PASS**（3/3，permission-change.spec.ts） |
@@ -84,7 +84,7 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 
 | 观测 | 结论 | 影响/去向 |
 | --- | --- | --- |
-| O1 指纹哈希碰撞（FNV-1a 32 位） | 实测可复现碰撞对（`{"x":"s406053133"}` 与 `{"d":{"inner":967754},"z":"s428930447"}` 同指纹 `12077584`），不同请求被当作相同 → 重放首次结果 | 契约「不同请求不能错误合并」=**FAIL**（已知限制，canonicalize.ts 审计 P1 已声明，0.2.0 升 SHA-256） |
+| O1 指纹哈希碰撞（FNV-1a 32 位） | 实测可复现碰撞对（`{"x":"s406053133"}` 与 `{"d":{"inner":967754},"z":"s428930447"}` 同指纹 `12077584`），不同请求被当作相同 → 重放首次结果 | 契约「不同请求不能错误合并」=**FAIL**（0.1.3 已知限制）；**0.2.0 已修复**：SHA-256 + `v1:` 版本字节，回归实证见 §11.3 |
 | O2 K2 实证 | 首次成功后外部补偿，同 key 重试重放旧「已创建」结果（attempts=1） | **FAIL**（已知限制，acceptance-c K2 复现的确定性用例版）；缓解路径（inFlightOnly/新 key/TTL 过期）PASS |
 | O3 权限门先于 idempotency | `tools/pre-execute` + ToolGuard 在 `tools/execute`（guard 监听处）之前执行；缓存命中路径上权限检查仍执行（gateChecks 计数不减） | **PASS**：缓存命中不绕过权限检查（机制确认） |
 | O4 宿主错误映射 | 本地宿主把 guard 传播的 rejection 与同步抛错映射为 `isError` 工具结果（非 promise rejection） | 观测记录：调用方以结果对象为准；waiter 取消可映射为 resolve 或 reject，套件两者均接受 |
@@ -139,6 +139,378 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 性能/内存基线结论：正确性零失败；延迟相对基线 +11%（本机 node v22.22.0）；
 内存无数量级积累。阈值按本机实测记录，未预先承诺毫秒数；精确泄漏检测
 （--expose-gc 采样）记录为局限，宽松上界断言仅用于捕获数量级泄漏。
+
+## 9. Phase 5 · 0.2.0 实现与验证（2026-09-07，分支 `0.2.0`）
+
+### 9.1 实现内容（src 变更）
+
+| 组件 | 变更 |
+| --- | --- |
+| `src/stores/memory.ts` | 四态模型（executing/succeeded/failed_safe 瞬态/unknown 墓碑）；代次号（invalidate/release/confirm 递增，settle/fail 校验，陈旧写回拦截）；`invalidate`/`release`/`confirm`/`query` 支撑方法；unknown 无 TTL 自动解除、FIFO 上限 maxEntries |
+| `src/index.ts` | 失败分类（成功→succeeded；`IDEMPOTENCY_NOT_COMMITTED` 证据→failed_safe；其余→unknown）；unknown 阻止自动重执行（`IDEMPOTENCY_STATE_UNKNOWN`，不随 TTL 解除）；`ctx.provide('toolIdempotency')` 服务（query/release/confirm/invalidate，同名挂载守卫） |
+
+### 9.2 验证结果（完整套件 139/139 全绿，typecheck exit 0）
+
+> 复验日志（2026-09-07 全量重跑留档）：`compat/test/logs/full-0.2.0-verify-2026-09-07.log`
+> （typecheck:tests / typecheck / build exit 0；test:p0 18/18；test:unit 69/69；
+> test:correctness 68/68；test:e2e 2/2。139 = unit 69 + correctness 68 + e2e 2）。
+
+| 方向 | 结果 | 证据 |
+| --- | --- | --- |
+| 既有 11 个失败语义用例迁移至新契约 | **PASS** | index.spec ×2、store-regression ×2、cancel-abort ×2、replay-fidelity ×2、combo-timeout ×2、lifecycle（provide 同名守卫） |
+| failed_safe（NOT_COMMITTED 证据→重试允许） | **PASS** | state-machine-0.2.0.spec.ts |
+| unknown 阻止重执行 + 不随 TTL 自动解除 | **PASS** | 同上（TTL=1 跨 1.1s 仍 blocked） |
+| inFlightOnly + unknown | **PASS** | 同上 |
+| query 状态转换（executing→succeeded） | **PASS** | 同上 |
+| confirm(key, result) 可重放验证结果 | **PASS** | 同上（result 需完整物化形状 isError/content/value） |
+| invalidate 清除缓存 + 代次防陈旧写回 | **PASS** | 同上（旧 owner 晚到结算不写回缓存） |
+| 并发到达（owner 完成与失效通知先后） | **PASS** | 同上 |
+| e2e Scenario A/B（chaos/transaction 本地宿主） | **PASS** | e2e.spec.ts 2/2（0.2.0 下未破坏） |
+
+### 9.3 0.2.0 状态归位
+
+| 项 | 0.1.3 | 0.2.0 |
+| --- | --- | --- |
+| K1 unknown：响应丢失后重试再次执行（effects=2） | FAIL（已知限制） | **已修复**（重试被阻止 + 对账路径）；上游写操作仍建议业务幂等 key 双重保障 |
+| K2 Saga 补偿后重放旧成功结果 | FAIL（已知限制） | **已修复**（invalidate + 代次 + 新操作身份语义） |
+| 单进程内存边界 | 保留 | 保留（Redis/多进程持久化不做，文档声明） |
+| 其余限制 | 保留 | 保留（跨重启无历史、meta/additionalContexts 未覆盖等；**O1 指纹碰撞已修复**，见 §11.3） |
+
+## 10. 基线复验记录（2026-09-07，分支 `0.2.0` 工作树 = 89f1624 + 未提交发布预备）
+
+> 目的：确认基线文档声称的事实当前仍成立（「确认基线后连续推进」的落点）。
+> 全部为本次实际执行结果，非转写历史 PASS。
+
+| 项 | 结果 | 证据 |
+| --- | --- | --- |
+| 本机全套件（typecheck:tests / typecheck / build / p0 / unit / correctness / e2e） | **PASS**：exit 0 ×3；18/18；69/69；68/68；2/2 | `compat/test/logs/full-0.2.0-verify-2026-09-07.log` |
+| fixture current-latest（registry 0.1.2-rc.1 闭包）重放 | **PASS**：baseline OK；regression 14/14；c3（PASS=3 + K1/K2 复现 3，FAIL=0）；agent-e2e executions=1 | `compat/fixtures/current-latest/`（npm ci 可重放） |
+| fixture prev-release（registry 0.1.1-rc.2 闭包）重放 | **PASS**：baseline OK；regression 14/14 | `compat/fixtures/prev-release-0.1.1-rc.2/` |
+| npm 0.1.3 发布产物哈希复验 | **PASS**：registry tarball sha256=`06b6ee24…` == 归档 tgz == 基线锁定值；sha512 与 dist.integrity 一致 | `baseline-0.1.3.md` §1；`npm pack @why-daydream/dsh-tool-idempotency@0.1.3` 实测 |
+| GitHub Actions 实际运行复验 | **PASS**：npm-publish run #4（34100982148，head=`bdde276`，event=push，tag v0.1.3）conclusion=success | api.github.com 复查（2026-09-07） |
+| 暴露 npm token 撤销（id 16ee9e） | **BLOCKED**（负责人官网操作；CLI 撤销被 403 拒绝，已实证） | `baseline-0.1.3.md` §6 |
+| 组合插件提交固定 | **PASS**（本次补记） | chaos `01130b5`、transaction `3cb9391`、bulkhead `c134237`、deepseek-harness `47f943859b`（见 baseline-0.1.3.md §2） |
+| 分支推送 origin（0.2.0 / test/0.1.3-full-acceptance） | **BLOCKED**（环境/认证） | SSH publickey denied（`github-ssh/id_ed25519` 被 GitHub 拒绝，无 GitHub https token）；提交已本地落地（`dce90ba`），推送待负责人重新配置认证 |
+
+## 11. 0.2.0 候选包验收（2026-09-07，分支 `0.2.0`）
+
+> 本轮按负责人审阅意见执行：打包 0.2.0 候选 tgz → 隔离 fixture 确认实际加载版本 → 重跑；
+> K1/K2 用真实 pipeline 复现脚本验证业务结果已改变；O1 单独记录处理状态；
+> 组合/负载补齐显式参数。**发布决策仍待负责人，本阶段只做候选验收。**
+>
+> **验收口径（2026-09-07 修订）**：本阶段完成的是「**归档运行验证通过**」（复用已验收
+> 宿主闭包 + 候选 tgz 解包 + 脚本版本校验）；「**干净安装验收**」（全新目录 `npm ci`
+> 同一份候选 tgz）因 registry tarball 下载超时 **BLOCKED-网络**——两者分开记账，
+> 不再使用「发布包级验收完成」表述。
+
+### 11.1 候选包与隔离 fixture
+
+| 项 | 值 |
+| --- | --- |
+| 候选 tgz | `compat/acceptance/why-daydream-dsh-tool-idempotency-0.2.0.tgz`（18554 B） |
+| sha256 | `26e0abd58bd44ce1540fdb664260b1a7277900d6879245a1ab11cecaa84be47c`（`tgz-0.2.0.sha256`，发布门禁同一命令 `sha256sum -c`） |
+| 归档内部 name/version | `@why-daydream/dsh-tool-idempotency` / `0.2.0`（tar 读 package/package.json 实测） |
+| 隔离 fixture（0.1.2-rc.1 线） | `compat/fixtures/current-latest-0.2.0/`：cordis 4.0.2 + dsh-* 0.1.2-rc.1 + 0.2.0 候选 tgz；脚本核对实际加载版本 === 0.2.0 |
+| 隔离 fixture（0.1.1-rc.2 线） | `compat/fixtures/prev-release-0.1.1-rc.2-0.2.0/`：0.2.0 候选包 × 上一发布线；脚本核对加载版本 === 0.2.0 |
+| 0.1.3 对照 | `compat/fixtures/current-latest/`（0.1.3 tgz 闭包，未改动） |
+| 干净安装 | **BLOCKED-网络**（registry tarball 下载超时；命令与重放步骤见 `compat/README.md`，网络恢复后 `npm install --package-lock-only` + 全新目录 `npm ci`） |
+
+**归档运行结果（0.2.0 候选，全部实际执行；脚本内 `[VERSION] plugin loaded = 0.2.0`）**
+
+| 脚本 | 0.1.2-rc.1 线 | 0.1.1-rc.2 线 |
+| --- | --- | --- |
+| baseline.mjs（无插件对照） | **PASS** | **PASS** |
+| regression.mjs | **PASS 14/14**（1 例按 0.2.0 契约改写） | **PASS 14/14**（同） |
+| structured-result.mjs | **PASS**（value 一致；meta/additionalContexts/concludesTurn UNCOVERED） | — |
+| c3-scenarios-0.2.0.mjs | **PASS 7/7** | — |
+| agent-e2e.mjs | **PASS**（executions=1） | — |
+
+**K1/K2 A/B 对照（同一 pipeline 复现脚本族，业务结果已改变）**
+
+| 场景 | 0.1.3 候选（对照 fixture） | 0.2.0 候选 |
+| --- | --- | --- |
+| 提交后 abort（副作用已执行、响应丢失） | `KNOWN_DEFECT K1`：重试自动重执行 **effects=2** | **修复**：重试返回 `IDEMPOTENCY_STATE_UNKNOWN`，effects 不增；`release` 对账后才重新执行 |
+| Saga 补偿后同 key 重发 | `KNOWN_DEFECT K2`：重放旧「已创建」结果（creates=1） | **修复**：`invalidate` 后重新执行（creates=2）并观察到**新业务状态**（`recreated (#2) after compensation`） |
+| 带 NOT_COMMITTED 证据的失败 | 同普通错误（不区分） | failed_safe：无墓碑，重试直接重新执行（attempts=2） |
+| unknown → confirm 验证结果 | 无此路径 | 重放验证结果，不重执行 |
+
+> fixture `package-lock.json` 生成受网络阻塞（registry tarball 下载超时，元数据可用）；
+> node_modules 复用已验收闭包 + 候选 tgz 解包（等价 file: 安装内容），脚本版本校验保证
+> 加载即 0.2.0。锁文件待网络恢复后 `npm install --package-lock-only` 补生成（**BLOCKED-网络**）。
+
+### 11.2 unknown 五要点验证（对照验收标准逐条，PASS）
+
+| 验收要点 | 结果 | 证据 |
+| --- | --- | --- |
+| 提交后失败进入 unknown，重试不新增副作用 | **PASS** | state-machine（TTL=1 跨 1.1s 仍 blocked）+ c3-0.2.0 K1（effects 不增） |
+| 确认未提交后，才允许重新执行 | **PASS** | 新增 release 用例（state-machine + store 层）+ c3-0.2.0 release 路径 |
+| 确认已提交后，提供正确结果或明确状态 | **PASS** | confirm 用例（重放验证结果）+ c3-0.2.0 confirm 路径 |
+| unknown 不因 TTL、容量淘汰、旧 owner 回写意外解除 | **PASS**（含本轮修复） | TTL 用例；**新增墓碑豁免容量淘汰**（store 层 5 墓碑 > maxEntries=2 全保留）；新增陈旧 owner fail 不写回；代次校验 |
+| Saga 失效与原操作完成并发时，旧结果不重新进入缓存 | **PASS** | 代次保护 2 用例（失效先/后到达两序） |
+
+### 11.3 O1 指纹碰撞处理状态（单独记录）
+
+| 项 | 0.1.3 | 0.2.0 |
+| --- | --- | --- |
+| 指纹算法 | FNV-1a 32 位（实测碰撞对 `12077584` → 不同请求被错误合并，**FAIL 复现**） | **升级 SHA-256 + 规范化版本字节 `v1:`**（node:crypto 内建，无新增依赖）；**修复已知 FNV 碰撞对**，碰撞概率大幅降低但**不作绝对免碰撞保证**（任何哈希均有理论碰撞可能，契约以实测碰撞对回归为准） |
+| 回归证据 | argument-equality「已知限制实证」断言 attempts=1 | 同一用例**翻转为修复实证**：attempts=2、结果各自独立、可分别重放；canonicalize.spec 新增碰撞对回归 |
+| 状态 | FAIL（核心正确性缺陷，曾被「全部测试通过」掩盖） | **PASS（已修复已知碰撞对）**；进程内缓存，无持久化迁移影响 |
+| 文档 | audit P1「计划升级 SHA-256」 | UPGRADE.md §5 / CHANGELOG [0.2.0] 记录 |
+
+### 11.4 组合与压力测试显式参数（已测范围如实声明）
+
+**已测宿主**：① 本地 link（cordis 4.0.1 + dsh-* 0.1.0-rc.5）全套件；② registry 0.1.2-rc.1 闭包 fixture；③ registry 0.1.1-rc.2 闭包 fixture；④ 0.2.0 候选 fixture（registry 0.1.2-rc.1 闭包）。
+
+**已测组合**（tests/correctness/combo-*.spec.ts + e2e，本地宿主）：timeout×idempotency（两注册序）、bulkhead×idempotency（两注册序）、权限×idempotency、chaos×idempotency（e2e Scenario A/B）；transaction×idempotency **BLOCKED-upstream**（peer ERESOLVE 实证，本地宿主 e2e Scenario B 覆盖补偿流程）。
+
+**压力参数与指标**（tests/correctness/stress.spec.ts，屏障驱动确定性并发，非 sleep 猜测）：
+
+| 负载 | 参数 | 观测 |
+| --- | --- | --- |
+| 同 key 大量并发 | 500 并发 | 副作用恰 1 次，500 waiter 全部结算 |
+| 不同 key 大量并发 | 200 并发、maxInFlight=16 | executed=16、capacity-rejected=184，槽释放后恢复 |
+| 混合负载 | 100 执行 + 100 重放 | 真实执行=100；本机基线 61.0ms vs 插件 67.7ms（+11% 相对，不预设毫秒阈值） |
+| 大参数/大结果 | 2MB content | 完整缓存重放，内存可控 |
+| waiter 取消 | 5 轮 × 50 | 全部干净退出，heap 净增长 −2.1MB（宽松上界） |
+| 长期未完成 owner | maxInFlight=1，5 次新 key | 持续容量拒绝且诊断含 `maxInFlight 1`，owner 完成即恢复 |
+| 持续运行周期清空 | 8 轮 × 200 新 key churn（FIFO 1024） | heap 采样收敛（44,38,34,47,48,49,48,47 MB），无线性增长 |
+
+**诚实声明**：现有压力为秒级确定性并发 + 相对内存采样；2026-09-07 已补 **150 秒长时负载
+（`--expose-gc`，见 §12.3）**；**小时级连续运行与精确泄漏判定仍 NOT_RUN**（宽松上界
+仅捕获数量级泄漏，`--expose-gc` 只是辅助观测，不单独证明无泄漏）。
+
+### 11.5 semver 0.2.x 拒绝范围（宿主澄清）
+
+- **“0.2.x 尚未发布”指 DSH 宿主**（`@deepseek-ai/dsh` 等 0.2.x 未发布，`targets.lock.json`
+  冻结事实），非本插件。
+- peer 联合范围对宿主 0.2.x **拒绝**：`tests/peer-range.spec.ts` 28 断言覆盖
+  `0.2.0` / `0.2.0-alpha.1` 不满足（`<0.2.0-0` 封顶每个成员）；**semver 层拒绝测试已执行**。
+- 运行时负例（装宿主 0.2.x 跑插件）在宿主 0.2.x 发布前不可构造 → **NOT_RUN**，不阻塞
+  semver 拒绝范围测试结论。
+
+### 11.6 本轮改动清单
+
+- 代码：`src/canonicalize.ts`（SHA-256 + `v1:` 版本字节）；`src/stores/memory.ts`（墓碑
+  豁免容量淘汰、fail() 识别 NOT_COMMITTED 证据）；`src/index.ts`（Config 注释）。
+- 测试：canonicalize.spec（碰撞对回归）；argument-equality.spec（O1 实证翻转）；
+  state-machine-0.2.0.spec（+4：release 路径、容量豁免、陈旧 owner、抛错证据）；
+  store-regression.spec（+3 store 层契约）。
+- 候选产物：0.2.0 tgz + sha256；fixture `current-latest-0.2.0`（版本校验注入 + c3 新契约）。
+- 文档：UPGRADE.md §5、CHANGELOG [0.2.0]、本矩阵 §11。
+
+## 12. 第二轮候选验收补测（2026-09-07，分支 `0.2.0`）
+
+> 按负责人第二轮审阅意见补齐：墓碑容量预算（内存有界）、release/confirm 业务账本证据、
+> 干净安装口径拆分、长时负载与资源释放。
+
+### 12.1 unknown 墓碑容量预算（maxUnknown，含并发预留）
+
+| 项 | 设计/证据 |
+| --- | --- |
+| 配置 | 新增 `maxUnknown`（默认 1024，独立于 `maxEntries`）：墓碑**永不淘汰**但**有独立预算**——内存有界且不静默解除防重复副作用标记 |
+| 并发预留口径 | 预算按 **`unknown + 在途执行 ≤ maxUnknown`** 计数（`reserve`/`unknownFull` 同口径）：所有在途请求都可能进 unknown，故在途即预留——杜绝「检查时未满、多个不同 key 并发启动、全部失败后集体突破预算」；**成功结算即释放预留**（succeeded 不占墓碑预算） |
+| 满载行为 | 预算耗尽时**前置拒绝**新受保护执行（新错误码 `IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED` / `IdempotencyUnknownCapacityRejected`）：不淘汰旧墓碑，也不让副作用在没有「失败后可记录位置」的情况下执行；**同 key 历史 unknown 不被绕过**（重试仍 `STATE_UNKNOWN`） |
+| 恢复 | 对账 `release`/`confirm` 释放预算；`invalidate` 不影响墓碑（补偿只管 succeeded 缓存） |
+| 测试 | store 层 +4（预算拒绝/恢复、`maxUnknown` 非正校验、**并发预留口径：maxUnknown=2 时同时在途 ≤2，全部失败后墓碑不突破**、**成功释放预留：一成一败预算正确**）；pipeline 层 +2（前置拒绝→对账→恢复 attempts 断言；**maxUnknown=2 时第 3 个并发新 key 在途预留阶段即被前置拒绝、全部失败后不突破、对账恢复**）；相关套件 69/69 全绿（**旧提交计数，最新候选独立复验见 §12.6**） |
+
+### 12.2 对账决策核对业务账本（release/confirm 业务证据）
+
+| 对账结果 | 后续动作 | 测试证据 |
+| --- | --- | --- |
+| 已提交成功 | `confirm` 正确结果 → 重试重放，账本不新增 | state-machine 账本用例：ledger 恰一条、attempts=1；c3-0.2.0「对账=已提交」场景 |
+| 确认未提交 / 已完成可靠补偿 | 才允许 `release` → 重新执行 | state-machine 账本用例：ledger 空→release→恰新增一条；c3-0.2.0「对账=未提交」场景（effects=2、ledger 仅 `commit-2`） |
+| 仍无法确定 | 保持 unknown，重试持续被阻止 | state-machine 账本用例（attempts 恒 1） |
+
+修正说明：0.2.0 首轮 c3 K1 场景以 `release` 结束（副作用已提交场景），本轮按负责人
+意见改为**账本核对后 `confirm`**——「提交后 abort」业务事实=已提交，`release` 会引入
+重复副作用；测试必须检查业务账本，不能只验证 release 后工具可再次运行。
+
+### 12.3 长时负载与资源释放（`--expose-gc`，150 秒，本地 link 宿主）
+
+运行：`node --expose-gc compat/stress/long-run.mjs 150`；日志
+`compat/test/logs/long-run-0.2.0-2026-09-07.log`。
+
+| 负载/指标 | 实测 |
+| --- | --- |
+| 时长 / 周期 | 150.0s / 2084 周期（每周期：100 成功 key + 100 unknown key + 并发 join/取消） |
+| 成功 key 去重 | 执行 41800 / 重放 41800，**零重复**（每个 key 恰执行 1 次） |
+| unknown 容量强制 | unknown 执行 13826、重试被阻止 13825；**满载前置拒绝 361175 次**；墓碑全程封顶 `maxUnknown=64` |
+| 对账恢复 | release 13409 + confirm 417；恢复后新 key 可执行 |
+| 并发 join/取消 | joined 14588、cancelled 4168、owner 执行 417（监听器不积累，无挂起） |
+| 内存（gc 后采样） | start 6MB → end 13MB（净增 +7MB）；采样 7–13MB 波动，unknown 恒 ≤64；后半段均值不高于前半段 >8MB 上界 |
+| 结论 | **ALL PASS**（正确性零失败；内存有界，无线性增长） |
+
+诚实声明：150 秒确定性负载 + gc 采样通过；**小时级连续运行已执行，见 §12.5**
+（§12.5 记录 3600s 全程曲线与清理后释放证据，替代此前的 NOT_RUN 状态）。
+
+### 12.5 小时级连续运行（3600s，`--expose-gc`，本地 link 宿主）
+
+运行：`node --expose-gc compat/stress/long-run.mjs 3600`（`LONG_TOTAL_JOIN_CAP=5000`）；
+日志 `compat/test/logs/long-run-1h-2026-09-07.log`（全量采样曲线在日志内）。
+
+| 负载/指标 | 实测 |
+| --- | --- |
+| 时长 / 周期 | 3600.0s / **50484 周期**（每周期：100 成功 key + 100 unknown key + 慢 join/取消 + 长期 owner join/cancel） |
+| 成功 key 去重 | 执行 **1009800** / 重放 **1009800**，**零重复**（1 小时约 200 万次受守卫调用） |
+| unknown 容量强制 | unknown 执行 666529、重试被阻止 333264；**满载前置拒绝 8753736 次**；墓碑全程封顶 `maxUnknown=64`（周期内联断言：历史墓碑不被绕过） |
+| 对账恢复 | release 323168 + confirm 10097；对账后新 key 可执行（预算恢复确认通过） |
+| 慢 join/取消 | joined 353388、cancelled 100968、owner 执行 10097（监听器不积累，无挂起） |
+| 长期 owner | 反复 join/cancel **5000 次后达总上限停止**（`LONG_TOTAL_JOIN_CAP`）；cancelled 4900、pending 封顶 100/100；owner 完成 → pending 全部结算 |
+| 内存（gc 后采样） | start **6MB** → end **12MB**（1 小时净增 **+6MB**，含长期 owner 宿主侧每 join 保留 ~4.5KB×5000≈22MB 预算内）；unknown 恒 ≤64；无持续线性增长 |
+| 清理后释放 | owner 完成 + 对账 + 插件卸载（dispose）后 heap 回落（final 11MB，与基线差 ≤15MB 上界内） |
+| 结论 | **ALL PASS**（正确性零失败；内存有界；owner 完成+对账+卸载后资源回落） |
+
+补充说明（**整体使用限制**，非插件缺陷但使用方必须遵守）：
+- **宿主侧 dispatch 记录随在途 owner 保留（整体使用限制）**：同一长期未完成 owner 每次
+  join（含已取消）约保留 4.5KB 宿主侧记录，**owner 完成才释放**（清理后回落为证）；
+  插件侧 waiter 已改为「abort 即从集合移除」的可脱离 join，不在 owner promise 上累积
+  `.then` 处理器。**本验证为指定负载下通过**（3600s，`LONG_TOTAL_JOIN_CAP=5000`，
+  join 达 5000 次后停止）——**不构成「无限持续 join/cancel 也有界」的证明**；使用方
+  必须以 owner 完成/超时策略 + 控制并发 join 量来约束宿主侧保留，长期不决的 owner
+  会持续占用对应内存。
+- **代次条目用毕即删**：`generations` 仅在「可能有陈旧 owner 未结算」期间驻留，小时级
+  运行 32 万次 release/confirm 后无累积（`growth=6MB` 即含该验证）。
+- 未观察项：跨重启边界（单进程语义）；精确逐对象泄漏判定需堆快照 diff，本轮以
+  gc 后曲线 + 清理释放 + 数量级上界覆盖。
+
+### 12.4 干净安装口径（与 §11.1 一致）
+
+- 本阶段 = **归档运行验证通过**（复用已验收宿主闭包 + 候选 tgz 解包 + 脚本版本校验）；
+  **干净安装验收 BLOCKED-网络**（registry tarball 下载超时）。
+- 上一发布线（0.1.1-rc.2）**0.2.0 候选包**归档运行：baseline OK、regression 14/14
+  （`compat/fixtures/prev-release-0.1.1-rc.2-0.2.0/`，版本校验已注入）。
+- 网络恢复后命令与步骤：`compat/README.md`「0.2.0 候选验收 fixture」。
+
+### 12.6 最新候选独立复验（HEAD `9877728`，2026-09-07）
+
+> 口径更正：**旧提交的全绿不能自动覆盖最新候选**。本节为最新候选（含并发预留、
+> 可脱离 join、generations 清理、3 个 P1 审查修复、**fencing token（P1-3a/3b）**
+> 提交 `2188880`→`9877728`）**自己的全套件结果**，与 §10/§12.1 记录的旧提交计数
+> （18/18、69/69、68/68、2/2）分开记账。
+
+| 套件 | 最新候选（HEAD `9877728`）结果 |
+| --- | --- |
+| typecheck:tests / typecheck / build | PASS（exit 0） |
+| p0（tests/p0） | 2 文件 **26/26** |
+| unit | 4 文件 **77/77** |
+| correctness | 13 文件 **89/89**（含 p1-review-regressions.spec.ts 12 用例） |
+| e2e | 1 文件 **2/2** |
+| 合计 | **194 用例全绿，ALL PASS**（`node compat/test/run-all.mjs` exit 0，2026-09-07 实测） |
+| fixture 重装复验 | current-latest-0.2.0：baseline OK / regression 14/14 / structured OK / c3 **PASS=7 FAIL=0** / agent-e2e OK；prev-release-0.1.1-rc.2-0.2.0：baseline OK / regression 14/14（均 `[VERSION] plugin loaded = 0.2.0`，候选 tgz sha256 `d923c8eb…`） |
+
+说明：最新候选新增并发预留、P1 反例、fencing 回归等用例（p0/unit/correctness 计数
+高于旧提交），计数不同即分开记录的原因；后续任何新提交都需以此节方式重跑，不能引用
+本节结果替代。
+
+## 13. 实际代码审查 3 个 P1：复现 → 修复 → 回归（2026-09-07，分支 `0.2.0`）
+
+> 负责人基于远端 `1275ba9` 实际代码审查 + 两处宿主线干净安装（npm ci 无 peer 绕过），
+> 发现 3 个 P1 反例；复核 fencing 后追加 P1-3a/3b（generation ABA 与同源一致性问题，
+> §13.5）。**修复前 0.2.0 暂不应发布**；本节按「复现 → 修复 → 回归」记录，
+> 反例回归文件 `tests/correctness/p1-review-regressions.spec.ts`（12 用例）。
+
+### 13.1 P1-1 执行中 invalidate 不得丢失未知提交状态
+
+- **反例**：工具提交副作用 → 执行中 `invalidate`（补偿流程）→ 工具报响应丢失（失败无证据）
+  → settle/fail 代次不匹配分支直接返回、不写 unknown → 同 key 重试 → **副作用累计 2 次**。
+- **复现**：pipeline 级测试「提交副作用 → 执行中 invalidate → 响应丢失 → 必须写 unknown
+  阻止重试」修复前 FAIL（query 返回 undefined 而非 unknown）。
+- **修复**（`6f40b36`）：区分**失效态**（invalidate）与**解除态**（release/confirm）——
+  `invalidatedKeys` 集合标记失效；settle/fail 代次不匹配时，失效态 + 失败无提交证据
+  → **必须写 unknown 保留阻止重试**（禁止旧成功结果写回 ≠ 可以遗忘未知提交状态）；
+  解除态维持不重新上锁（旧执行晚到不得回写）。
+- **回归**：反例 PASS；旧成功不写回 PASS；release 态晚到不重新上锁 PASS。
+
+### 13.2 P1-2 generations 清理漏掉提前返回分支
+
+- **反例**：`reserve → invalidate → settle` 循环 1000 次（实际构建产物实测），代次不匹配
+  分支在 `generations.delete()` 前 return → **generations 条目数 = 1000**（业务记录 0）。
+- **复现**：store 层循环测试修复前 FAIL（`expected 1000 to be +0`）。
+- **修复**（`6f40b36`）：settle/fail 的 failed_safe、代次不匹配等**所有退出路径**统一清理
+  `generations`/`invalidatedKeys`。
+- **回归**：循环 1000 次 settle 与 fail 两用例 PASS（generations 清零；fail 路径同时验证
+  P1-1 写 unknown）。
+
+### 13.3 P1-3 对账 API 不校验 fingerprint，可解除另一请求的 unknown
+
+- **反例**（显式 key，keyArg=orderId）：A（key=K, amount=10）进入 unknown 后，
+  `release(B)`（key=K, amount=999）当前代码直接删除 A 的 unknown（只看 key 不看参数）；
+  重试 A → **副作用累计 2 次**。confirm/invalidate 同理可覆盖/清除对方记录。
+- **复现**：pipeline 级三用例（release/confirm/invalidate 冲突）修复前 FAIL。
+- **修复**（`6f40b36` + `f6aca7f`）：
+  - store 层 `release/invalidate/confirm` 校验已有记录 fingerprint，冲突**拒绝且保持原状态**；
+  - **fencing token**：每轮执行分配 `crypto.randomUUID()` executionId（永不回退、生命周期
+    唯一），对账方法校验 `fingerprint + expectedExecutionId`，与 query 返回**同源**
+    （都读记录本身的 executionId）——旧对账结果（ABA）永远无法作用于新一轮执行
+    （P1-3a/3b 详见 §13.5）；
+  - `ToolIdempotencyApi` 对账方法返回 `{ ok, error? }`（冲突含
+    `IDEMPOTENCY_GENERATION_MISMATCH`），原因明确。
+- **回归**：三用例 PASS（冲突保持原状态 + 正确参数才可解除/覆盖/失效）。
+
+### 13.4 修复后全量回归
+
+| 项 | 结果 |
+| --- | --- |
+| 反例回归（`p1-review-regressions.spec.ts`） | 复现阶段 **6 FAIL** → 修复后 **12/12 PASS**（含 fencing Case 1-4，2026-09-07 实测） |
+| 全套件（run-all.mjs） | typecheck:tests / p0 26/26 / unit 77/77 / correctness **89/89** / e2e 2/2 → **194 用例 ALL PASS**，exit 0（§12.6） |
+| fixture 重装复验 | current-latest-0.2.0 五脚本全过（c3 PASS=7 FAIL=0）+ prev-release 线 14/14（候选 tgz sha256 `d923c8eb…`） |
+| 提交/推送 | `6f40b36`/`9187061`/`ba99275`（P1 修复轮）+ `f6aca7f`/`012ad00`/`9877728`（fencing 轮）已推送远端 `0.2.0`（`1275ba9..9877728`） |
+| 干净安装（负责人侧） | 两条宿主线新生成锁文件 `npm ci` 成功、无 peer 绕过、各 14/14（§13 引言） |
+
+**发布状态（2026-09-07 负责人正式 verdict）**：
+- **P1-1 / P1-2 / P1-3 / P1-3a / P1-3b correctness gates：CLEARED**
+  （P1-3a ABA / token reuse CLOSED；P1-3b query / reconcile token consistency CLOSED；
+  P1-3 fingerprint reconciliation PASS；回归 194/194）。
+- **0.2.0 remains HOLD solely because `transaction × idempotency` real-composition
+  acceptance is blocked by upstream peer incompatibility**——HOLD 不再是自身
+  correctness 已知 bug，而是承诺的真实组合兼容性尚未拿到验收证据。
+- 若该组合是 0.2.0 正式兼容矩阵项 → 不发版；若团队决定从 0.2.0 scope 明确剥离 →
+  release note 标明 Known limitation：「transaction × idempotency composition is not
+  certified in 0.2.0 due to unresolved upstream peer dependency compatibility」，
+  之后 0.2.0 即具备解除 HOLD 的技术条件（决策权在团队/负责人）。
+
+### 13.5 P1-3a/3b fencing token（executionId）——P1-3 关闭前提
+
+> 负责人复核 P1-3 时发现更深一层问题：**generation 因清理被复用（经典 ABA / fencing
+> token 失效）**——`generation 相等 ≠ 一定是同一次执行`；且「query 返回的 generation
+> 与 release 校验的不一致」会造成合法对账被拒（unknown 无法解除，key 长期不可恢复）。
+> 这两点直接击穿 P1-3「旧对账结果不能作用于新执行」的修复目标。
+
+- **ABA 反例（P1-3b 核心）**：执行 A（token=1）→ invalidate/release → 清理 → 执行 B
+  （token 又从 1 开始）→ 网络中迟到的 `release(expectedGeneration=1)` 误判为针对 B
+  → **旧对账结果仍能作用于新执行**。
+- **契约**：`executionId` 是每轮执行分配、**永不回退且在生命周期内唯一**的 fencing
+  token；query 返回与 release/confirm/invalidate 校验**同源**（都读记录本身的
+  executionId）；**删除业务状态 ≠ 删除 fencing 历史**（token 不复用，规避 P1-2 清理
+  与 fencing 的冲突）。
+- **修复**（`f6aca7f`）：reserve 分配 `crypto.randomUUID()` 作为 executionId；对账方法
+  校验 `fingerprint + expectedExecutionId`（记录不存在或 token 不匹配 → 拒绝且保持
+  原状态）；错误码 `IDEMPOTENCY_GENERATION_MISMATCH`；query 返回 `executionId`
+  （替换原 generation）。
+- **回归**（4 用例，全部 PASS）：
+  - Case 1：executionId 不允许复用（两轮执行 token 不同，UUID 永不回退）；
+  - Case 2（P1-3b 核心）：ABA stale `release(expectedExecutionId=g1)` → `ok=false` +
+    `GENERATION_MISMATCH`，新执行仍存在且属于 g2；
+  - Case 3：query → release round trip（中间无状态变化必须成功，同源一致）；
+  - Case 4：stale confirm/release/invalidate 全部拒绝（fencing 一致覆盖三个对账方法），
+    新执行状态保持。
+
+**并发临界区检查（负责人复核项，2026-09-07）**：`release/confirm/invalidate` 的
+「读取 record → 校验 fingerprint + expectedExecutionId → mutation/delete」为**同步
+临界区**——中间无 await/callback/外部 I/O（单进程 JS Map 模型），compare + mutation
+不可被其他 execution 插入，ABA 风险关闭。**未来存储层换 Redis/Postgres 时必须升级为
+真 CAS**（`DELETE ... WHERE key=? AND fingerprint=? AND execution_id=?`，或 Redis
+Lua / WATCH-MULTI），不能沿用 GET→判断→DEL——作为分布式实现 invariant 记录。
+
+**术语精确化（记录到文档，非发布阻塞项）**：`executionId` 更准确叫法为
+**execution-scoped stale-operation fence / CAS identity token**——全局高概率唯一 UUID
++ equality CAS 对「stale reconciliation 不能作用于新 idempotency execution」目标完全
+足够；UUID 无顺序关系，**不宣称「单调递增 fencing token」**（单调递增语义留给未来
+分布式 fencing counter / `token <= lastSeenToken` 场景）。错误码
+`IDEMPOTENCY_GENERATION_MISMATCH` 实际校验对象已是 `expectedExecutionId`、语义略旧，
+**保留不动**（已在兼容面，改名收益低）；如需可未来新增 `IDEMPOTENCY_EXECUTION_MISMATCH`
+或随大版本调整。
+
 
 
 

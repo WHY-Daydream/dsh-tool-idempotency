@@ -3,6 +3,64 @@
 本项目的版本历史。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.0] - 2026-09-07（验收完成，发布决策待负责人；分支 `0.2.0`）
+
+> **状态：实现与专项测试完成（139/139 用例全绿，typecheck exit 0），已全量复验
+> （2026-09-07，见 `compat/test/test-matrix.md` §9/§10）；产物未打包、未发布——
+> 发布决策待负责人。** 解决 0.1.3 明确接受的两个正确性缺口（unknown 状态机、
+> Saga 缓存失效）。本版**含行为变化**：不再把所有 `isError` 解释为「可以重新执行」。
+
+### 行为变化（相对 0.1.3）
+
+- **unknown 状态（K1 修复方向）**：无提交证据的失败（超时/abort/普通抛错/未带证据码的错误
+  结果）进入 `unknown` 状态——**阻止自动重执行**，且**不随 TTL 自动解除**。重试返回结构化
+  错误 `IDEMPOTENCY_STATE_UNKNOWN`（`IdempotencyStateUnknown`）。须经下游对账后
+  `release`/`confirm` 解除，或改用新的操作身份（新 key）。
+- **failed_safe**：工具/包装器返回带证据码 `IDEMPOTENCY_NOT_COMMITTED`
+  （`error.info.code`）的错误结果时，视为「确定未提交」，释放锁且不留记录，重试允许
+  重新执行。**无证据时不得凭错误码猜测提交状态**。
+- 新增配置 **`maxUnknown`（默认 1024）**：unknown 墓碑的独立容量预算（墓碑永不淘汰，
+  但内存有界），按**并发预留口径**计数——`unknown + 在途执行 ≤ maxUnknown`，杜绝
+  「检查时未满、并发全部失败后突破预算」（成功结算即释放预留）。预算耗尽时**新受保护
+  执行被前置拒绝**（`IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED`，不淘汰旧墓碑、不让副作用
+  在没有「失败后可记录位置」的情况下执行），对账 `release`/`confirm` 后恢复。
+- **join 可脱离（waiter 集合）**：join 中的 waiter 以集合形式挂在执行条目上，abort 即
+  从集合移除并移除监听器——长期未完成 owner 被反复 join/cancel 时不在 owner promise
+  上累积 `.then` 处理器（宿主侧 dispatch 记录仍随在途 owner 保留，owner 完成即释放）。
+- **代次条目用毕即删**：`generations` 只在「可能有陈旧 owner 未结算」期间驻留
+  （settle/fail 后、无在途时的 release/confirm/invalidate 后即删），避免随 key 数
+  无限增长。
+- **Saga 缓存失效（K2 修复方向）**：新增 `ctx.get('toolIdempotency')` 接口——
+  `query` / `release` / `confirm` / `invalidate`（均按 name+args 解析 key）。
+  - `invalidate(name, args)`：清除 succeeded 缓存并递增**代次**；旧 owner 晚到结算
+    （owner+代次校验）不会把已失效结果写回。
+  - `confirm(name, args, result)`：下游确认已提交 → 写入验证过的结果（可重放）。
+  - `release(name, args)`：状态解除 → 后续同 key 重新执行。
+  - 对账三方法均校验 **fingerprint + expectedExecutionId**：`executionId` 为每轮执行
+    的 execution-scoped stale-operation fence / CAS identity token（`crypto.randomUUID()`，
+    不复用）——不同参数（另一请求）或旧执行（ABA）时拒绝且保持原状态，错误码
+    `IDEMPOTENCY_GENERATION_MISMATCH`；`query` 返回 `executionId` 供回传绑定。
+  - **仅删除缓存≠可安全重执行**：补偿后需结合业务状态与新的操作身份决定后续动作。
+
+### Fixed（相对 0.1.3 的 FAIL 复现）
+
+- K1（unknown）：副作用已提交但响应丢失后，重试**不再盲目再次执行**（effects=2 场景
+  变为重试被阻止 + 显式对账路径）。
+- K2（Saga 补偿后一致性）：补偿流程可 `invalidate` 使原操作成功缓存失效，且代次机制
+  防止旧执行写回陈旧结果。
+- **O1（指纹碰撞）**：请求指纹 FNV-1a 32 位 → **SHA-256**（+ 规范化版本字节 `v1:`）；
+  **修复 0.1.3 实测碰撞对**（`12077584`），回归实证见 `argument-equality.spec.ts`；
+  碰撞概率大幅降低，但不作绝对免碰撞保证。
+- **unknown 墓碑豁免容量淘汰**：`maxEntries` 只约束 succeeded 缓存，unknown 墓碑永不
+  淘汰——容量压力不再静默解除防重复副作用标记（store/state-machine 补测覆盖）。
+- **failed_safe 证据可来自抛错**：抛 `HarnessError(message, 'IDEMPOTENCY_NOT_COMMITTED')`
+  与返回带证据码的错误结果等效（宿主保留 `error.info.code`）；无证据一律 unknown。
+
+### 迁移注意
+
+- 依赖「失败即重试」语义的调用方必须显式提供 `IDEMPOTENCY_NOT_COMMITTED` 证据码，或
+  在重试前 `query` 状态并 `release`/`confirm`。详见 `docs/UPGRADE.md` [0.2.0]。
+
 ## [0.1.3] - 2026-09-07（发布候选，尚未发布）
 
 > **发布状态：候选，未发布、未上 npm。** 内容 = 0.1.2 源码线的兼容 patch（未发布，

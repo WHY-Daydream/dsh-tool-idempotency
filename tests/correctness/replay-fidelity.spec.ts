@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from 'vitest'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { executeTool, registerTool, toolHarness } from './harness.js'
+import { executeTool, idempotencyApi, registerTool, toolHarness } from './harness.js'
 
 describe('结果重放：内容保真', () => {
   it('多模态 content（text + reasoning 混合）完整重放，与首次结果深度相等', async () => {
@@ -71,7 +71,7 @@ describe('结果重放：内容保真', () => {
 })
 
 describe('结果重放：错误身份不复制', () => {
-  it('isError 结果不缓存：重试重新执行，错误结果不被重放', async () => {
+  it('isError 结果不缓存且转 unknown：重试被阻止（错误不被重放/不重新执行）；release 后执行新结果', async () => {
     let attempts = 0
     const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
     registerTool(ctx, 'create_order', async () => {
@@ -83,13 +83,20 @@ describe('结果重放：错误身份不复制', () => {
     expect(r1).toMatchObject({ isError: true }) // 宿主把 guard 传播的失败映射为 isError 结果
     expect(JSON.stringify(r1)).toContain('unique-err-1')
 
+    // 0.2.0：无提交证据的错误 → unknown；重试被阻止且错误不被重放
     const r2 = await executeTool(ctx, 'create_order', { orderId: 'a' })
-    expect(r2).toMatchObject({ isError: false, content: [{ type: 'text', text: 'ok-2' }] })
-    expect(attempts).toBe(2) // 错误未缓存：重试重新执行
+    expect(r2).toMatchObject({ isError: true, error: { info: { code: 'IDEMPOTENCY_STATE_UNKNOWN' } } })
     expect(JSON.stringify(r2)).not.toContain('unique-err') // 错误身份未被复制进重试结果
+    expect(attempts).toBe(1) // 未盲目重新执行
+
+    idempotencyApi(ctx).release('create_order', { orderId: 'a' })
+    const r3 = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(r3).toMatchObject({ isError: false, content: [{ type: 'text', text: 'ok-2' }] })
+    expect(attempts).toBe(2) // 解除后重新执行
+    expect(JSON.stringify(r3)).not.toContain('unique-err')
   })
 
-  it('失败后的成功结果同样被缓存重放（先失败后成功，成功结果可复用）', async () => {
+  it('失败后的成功结果同样被缓存重放（先失败→unknown→release 后成功，成功结果可复用）', async () => {
     let attempts = 0
     const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
     registerTool(ctx, 'create_order', async () => {
@@ -97,7 +104,12 @@ describe('结果重放：错误身份不复制', () => {
       if (attempts === 1) throw new Error('boom-first')
       return [{ type: 'text', text: 'order-committed' }]
     })
-    await executeTool(ctx, 'create_order', { orderId: 'a' })
+    await executeTool(ctx, 'create_order', { orderId: 'a' }) // 首次失败 → unknown
+    const blocked = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(blocked).toMatchObject({ isError: true, error: { info: { code: 'IDEMPOTENCY_STATE_UNKNOWN' } } })
+    expect(attempts).toBe(1)
+
+    idempotencyApi(ctx).release('create_order', { orderId: 'a' })
     const r2 = await executeTool(ctx, 'create_order', { orderId: 'a' })
     expect(r2).toMatchObject({ content: [{ type: 'text', text: 'order-committed' }] })
     const r3 = await executeTool(ctx, 'create_order', { orderId: 'a' })

@@ -62,4 +62,18 @@ describe('canonicalize — own-field preservation (P0)', () => {
     expect(fp('t', zh)).toBe(fp('t', { 备注: '中文', 订单: '甲' }))
     expect(fp('t', zh)).not.toBe(fp('t', { 订单: '甲', 备注: '英文' }))
   })
+
+  it('0.2.0 回归（O1）：FNV-1a 实测碰撞对在 SHA-256 下不再碰撞', () => {
+    // 0.1.3 FNV-1a 实测碰撞对（审计 P1/O1）：规范字符串不同但旧指纹同为 12077584。
+    // 0.2.0 升级 SHA-256 + 规范化版本字节后必须区分。
+    const COLLISION_A = { x: 's406053133' }
+    const COLLISION_B = { d: { inner: 967754 }, z: 's428930447' }
+    const fa = fp('create_order', COLLISION_A)
+    const fb = fp('create_order', COLLISION_B)
+    expect(JSON.stringify(COLLISION_A)).not.toBe(JSON.stringify(COLLISION_B))
+    expect(fa).not.toBe(fb)
+    expect(fa).not.toBe('12077584')
+    expect(fa).toMatch(/^v1:[0-9a-f]{64}$/) // 规范化版本字节 + SHA-256 hex
+    expect(fb).toMatch(/^v1:[0-9a-f]{64}$/)
+  })
 })

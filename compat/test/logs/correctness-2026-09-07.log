@@ -1,0 +1,56 @@
+
+> @why-daydream/dsh-tool-idempotency@0.1.3 test:correctness
+> vitest run tests/correctness/*.spec.ts
+
+
+ RUN  v4.1.10 /mnt/workspace/DSH/dsh-tool-idempotency
+
+stdout | tests/correctness/business-state-change.spec.ts > 业务状态变化：补偿后不得把失效缓存当业务事实 > K2 实证：首次成功后外部补偿，同 key 重试仍重放旧「已创建」结果（0.1.3 已知限制）
+[K2] 补偿后同 key 重试结果： {"isError":false,"content":[{"type":"text","text":"order created"}],"value":[{"type":"text","text":"order created"}]} attempts= 1
+
+ ✓ tests/correctness/request-isolation.spec.ts (7 tests) 61ms
+ ✓ tests/correctness/cancel-abort.spec.ts (5 tests) 85ms
+ ✓ tests/correctness/combo-bulkhead.spec.ts (3 tests) 241ms
+stdout | tests/correctness/stress.spec.ts > 压力：不同 key 大量并发（maxInFlight） > 200 并发（maxInFlight=16）：恰 16 次执行、其余容量拒绝，槽释放后恢复
+[STRESS] 200 并发 maxInFlight=16：executed=16 capacity-rejected=184
+
+stdout | tests/correctness/combo-timeout.spec.ts > 组合：timeout（外层） + idempotency（内层） > 非合作 body：timeout 无法生效，调用挂起（组合契约限制实证：超时是合作式预算）
+[COMBO-TIMEOUT] 非合作 body：调用在超时预算后未结算 settled= false （timeout 为合作式预算，需下游转发 signal）
+
+ ✓ tests/correctness/combo-timeout.spec.ts (3 tests) 431ms
+     ✓ 非合作 body：timeout 无法生效，调用挂起（组合契约限制实证：超时是合作式预算）  304ms
+stdout | tests/correctness/stress.spec.ts > 压力：混合负载（重复 + 新请求）与基线对比 > 吞吐/延迟相对统计：无插件基线 vs 插件（100 执行 + 100 重放）
+[STRESS] 基线(200 独立) 80.2ms | 插件(100 执行+100 重放) 80.7ms | 真实执行=100
+
+ ✓ tests/correctness/lifecycle.spec.ts (6 tests) 63ms
+stdout | tests/correctness/argument-equality.spec.ts > 参数判等：模拟哈希碰撞（FNV-1a 32 位） > 0.1.3 已知限制实证：指纹碰撞被当作相同请求重放（不同请求被错误合并）
+[KNOWN-LIMITATION] fingerprint collision: A={"x":"s406053133"} B={"d":{"inner":967754},"z":"s428930447"} fp=12077584 → attempts=1 (0.1.3 FNV-1a 非防碰撞，审计 P1 已计划升级 SHA-256)
+
+ ✓ tests/correctness/argument-equality.spec.ts (9 tests) 50ms
+stdout | tests/correctness/stress.spec.ts > 压力：大量 waiter 加入后取消 > 5 轮 × 50 waiter 取消：全部干净退出、owner 正常结算、内存无持续积累（宽松上界）
+[STRESS] 5 轮 × 50 waiter 取消：heap 净增长 12.2MB
+
+stdout | tests/correctness/replay-fidelity.spec.ts > 结果重放：附加字段形状探测（如实记录，不宣称支持） > 探测宿主物化结果的字段形状并验证重放完整保真
+[PROBE] materialized result keys=["isError","content","value"] value?=true meta?=false additionalContexts?=false
+
+ ✓ tests/correctness/replay-fidelity.spec.ts (6 tests) 48ms
+ ✓ tests/correctness/permission-change.spec.ts (3 tests) 23ms
+stdout | tests/correctness/business-state-change.spec.ts > 业务状态变化：补偿后不得把失效缓存当业务事实 > 探测：0.1.3 无公开缓存失效/代次接口（0.2.0 invalidate 方向的前置事实）
+[PROBE] plugin exports: Config,apply,name
+
+ ✓ tests/correctness/business-state-change.spec.ts (5 tests) 1142ms
+     ✓ TTL 到期后重试返回当前业务状态（不再重放失效旧结果）  1106ms
+stdout | tests/correctness/stress.spec.ts > 压力：持续运行周期清空 > 8 轮 × 200 新 key churn：缓存有界（FIFO 1024）下内存不线性增长（相对采样）
+[STRESS] heap MB 采样（8 轮）: 36,45,41,39,39,48,40,46
+
+ ✓ tests/correctness/stress.spec.ts (6 tests) 1197ms
+     ✓ 8 轮 × 200 新 key churn：缓存有界（FIFO 1024）下内存不线性增长（相对采样）  621ms
+ ✓ tests/correctness/cache-boundary.spec.ts (7 tests) 2300ms
+     ✓ TTL 到期前重放，到期后重新执行  1124ms
+     ✓ 执行锁不受 TTL 影响：owner 挂起超过 TTL，同 key 重试仍 join 而非重新执行  1117ms
+
+ Test Files  11 passed (11)
+      Tests  60 passed (60)
+   Start at  17:29:46
+   Duration  3.04s (transform 2.29s, setup 0ms, import 3.40s, tests 5.64s, environment 1ms)
+

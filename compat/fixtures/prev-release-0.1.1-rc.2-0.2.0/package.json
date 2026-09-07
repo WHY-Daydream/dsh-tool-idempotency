@@ -1,0 +1,15 @@
+{
+  "name": "dsh-idempotency-fixture-prev-0.1.1-rc.2-0.2.0",
+  "private": true,
+  "version": "0.0.0",
+  "description": "0.2.0 候选包 × 上一发布线 0.1.1-rc.2 闭包 fixture。精确版本；脚本内核对实际加载版本=0.2.0。干净安装：npm ci（网络恢复后）；当前网络阻塞时仅作归档运行验证（复用已验收闭包 + tgz 解包）。",
+  "type": "module",
+  "dependencies": {
+    "@why-daydream/dsh-tool-idempotency": "file:../../acceptance/why-daydream-dsh-tool-idempotency-0.2.0.tgz",
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-invariants": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.1.1-rc.2"
+  }
+}

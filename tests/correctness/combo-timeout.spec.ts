@@ -15,7 +15,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import * as TimeoutPolicy from '@deepseek-ai/dsh-tool-call-timeout-policy'
 import * as Idempotency from '../../src/index.js'
-import { executeTool, tick, until } from './harness.js'
+import { executeTool, idempotencyApi, tick, until } from './harness.js'
 
 /** 2s 安全护栏：组合缺陷导致永久挂起时快速失败而不是拖死套件。 */
 async function withinGuard<T>(promise: Promise<T>, label: string): Promise<T> {
@@ -48,7 +48,7 @@ async function comboHarness(order: 'timeout-first' | 'idempotency-first'): Promi
 }
 
 describe('组合：timeout（外层） + idempotency（内层）', () => {
-  it('提交前后超时（合作 body）：超时错误不缓存、锁释放，重试重新执行（K1 边界：响应丢失无法区分提交与否）', async () => {
+  it('提交前后超时（合作 body，0.2.0 K1 修复实证）：超时错误转 unknown，重试被阻止；release 对账后重新执行', async () => {
     let attempts = 0
     const records: string[] = []
     const ctx = await comboHarness('timeout-first')
@@ -66,10 +66,16 @@ describe('组合：timeout（外层） + idempotency（内层）', () => {
     }))
 
     const r1 = await withinGuard(executeTool(ctx, 'create_order', { orderId: 'a' }), 'first call')
-    expect(r1).toMatchObject({ isError: true }) // 超时错误
+    expect(r1).toMatchObject({ isError: true }) // 超时错误（无提交证据）
+    // 0.2.0：超时（响应丢失）→ unknown → 重试被阻止（K1 修复：不再盲目重执行）
     const r2 = await withinGuard(executeTool(ctx, 'create_order', { orderId: 'a' }), 'retry')
-    expect(r2).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-2' }] })
-    expect(attempts).toBe(2) // 锁已释放；重试重新执行恰好一次（K1：effects=2，提交点不可判）
+    expect(r2).toMatchObject({ isError: true, error: { info: { code: 'IDEMPOTENCY_STATE_UNKNOWN' } } })
+    expect(attempts).toBe(1) // 未盲目重执行
+
+    idempotencyApi(ctx).release('create_order', { orderId: 'a' }) // 下游对账确认后解除
+    const r3 = await withinGuard(executeTool(ctx, 'create_order', { orderId: 'a' }), 'release-retry')
+    expect(r3).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-2' }] })
+    expect(attempts).toBe(2) // 解除后重新执行恰好一次
     expect(records).toEqual(['exec-1', 'exec-2'])
   })
 
@@ -98,7 +104,7 @@ describe('组合：timeout（外层） + idempotency（内层）', () => {
 })
 
 describe('组合：idempotency（外层） + timeout（内层）', () => {
-  it('owner 超时：joiner 先 join（不重复执行），共享失败；锁释放后重试可执行', async () => {
+  it('owner 超时：joiner 先 join（不重复执行），共享失败转 unknown；release 对账后重试可执行', async () => {
     let attempts = 0
     const ctx = await comboHarness('idempotency-first')
     ctx.tools.register(defineContentToolFixture({
@@ -120,8 +126,15 @@ describe('组合：idempotency（外层） + timeout（内层）', () => {
     expect(rOwner).toMatchObject({ isError: true }) // 超时失败
     expect(rJoiner).toMatchObject({ isError: true }) // joiner 共享 owner 失败，未重复执行
     expect(attempts).toBe(1)
+
+    // 0.2.0：超时（响应丢失）→ unknown → 重试被阻止
+    const blocked = await withinGuard(executeTool(ctx, 'create_order', { orderId: 'a' }), 'blocked-retry')
+    expect(blocked).toMatchObject({ isError: true, error: { info: { code: 'IDEMPOTENCY_STATE_UNKNOWN' } } })
+    expect(attempts).toBe(1)
+
+    idempotencyApi(ctx).release('create_order', { orderId: 'a' })
     const retry = await withinGuard(executeTool(ctx, 'create_order', { orderId: 'a' }), 'retry')
     expect(retry).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-2' }] })
-    expect(attempts).toBe(2) // 锁已释放：重试重新执行
+    expect(attempts).toBe(2) // 解除后重新执行
   })
 })
