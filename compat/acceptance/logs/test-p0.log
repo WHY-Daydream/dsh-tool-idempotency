@@ -1,0 +1,15 @@
+
+> @why-daydream/dsh-tool-idempotency@0.1.2 test:p0
+> vitest run tests/canonicalize.spec.ts tests/store-regression.spec.ts
+
+
+ RUN  v4.1.10 /mnt/workspace/DSH/dsh-tool-idempotency
+
+ ✓ tests/canonicalize.spec.ts (7 tests) 5ms
+ ✓ tests/store-regression.spec.ts (11 tests) 8ms
+
+ Test Files  2 passed (2)
+      Tests  18 passed (18)
+   Start at  11:24:42
+   Duration  405ms (transform 95ms, setup 0ms, import 141ms, tests 13ms, environment 0ms)
+

@@ -35,7 +35,8 @@ create_order()        ← Agent 重试：订单被创建两次
 ```yaml
 idempotency:
   ttl: 3600            # 缓存 TTL（秒），默认 3600
-  maxEntries: 1024     # MemoryStore 上限，超出按 createdAt 淘汰最旧
+  maxEntries: 1024     # 成功结果缓存上限，超出按 createdAt 淘汰最旧；绝不淘汰执行中锁
+  maxInFlight: 256     # 同时在途执行上限（默认 256）；打满时新调用拒绝，不执行副作用
   rules:
     - tool: 'create_order'    # `*` 通配；首条匹配生效
       mode: 'reuse'           # reuse | inFlightOnly | off（默认 reuse）
@@ -51,6 +52,7 @@ idempotency:
 | 码 | 含义 |
 |---|---|
 | `IDEMPOTENCY_KEY_MISMATCH` | 同 key 但 fingerprint 不同（同 key 不同参数）→ fail loud，不执行 |
+| `IDEMPOTENCY_CAPACITY_REJECTED` | 在途并发已达 `maxInFlight` → 拒绝该次调用（结构化错误），不执行副作用；执行锁既不淘汰也不绕过 |
 | `IDEMPOTENCY_INFLIGHT_FAILED` | 等待并发调用时，in-flight 调用失败，等待方拿到同一失败结果 |
 
 ## ③ 状态机
@@ -73,6 +75,7 @@ idempotency:
 ```text
 key 查找
 ├─ 无记录 → EXECUTING（记 in-flight promise）→ 执行 → SUCCEEDED / FAILED
+│         （在途已达 maxInFlight → 返回 IDEMPOTENCY_CAPACITY_REJECTED，绝不执行）
 ├─ EXECUTING → fingerprint 一致？→ 等待 in-flight promise → 返回同一结果（并发去重）
 │             fingerprint 不一致 → IDEMPOTENCY_KEY_MISMATCH（fail loud）
 ├─ SUCCEEDED（TTL 内）→ fingerprint 一致？
@@ -87,6 +90,8 @@ key 查找
 
 - **FAILED 不重放**：失败结果不代表「副作用已完成」，重试必须重新执行；这也与 dsh-chaos 的 `dropResult`（副作用发生但结果丢失）互补——若工具真实执行过，重复副作用由 `dsh-tool-transaction` 补偿
 - **并发去重**：in-flight promise 是权威；等待方不重新执行
+- **执行锁不可淘汰（P0）**：`maxEntries` 容量与 TTL 只作用于 SUCCEEDED 缓存；EXECUTING 锁不会被缓存压力挤掉，在途任务也不会因缓存 TTL 重入
+- **settle/fail 带 owner**：晚到的旧完成/旧失败不能删除或覆盖该 key 的新记录
 - **缓存结果不可变**：复用前 deep-freeze，不落入后续 listener 的改写
 
 ## ④ DSH Tool Pipeline 接入
@@ -119,13 +124,15 @@ tool/call → tools/pre-execute（allow/deny/ask）
 ```ts
 interface IdempotencyStore {
   get(key: string): Entry | undefined
-  put(key: string, entry: Entry): void
-  delete(key: string): void
+  reserve(key: string, fingerprint: string): Reservation | null // 在途槽；null = maxInFlight 打满
+  settle(key: string, owner: number, result: ToolExecutionResult, ttlMs: number): void // owner 校验：成功入缓存，isError 只释放锁
+  fail(key: string, owner: number, error: unknown): void        // owner 校验：释放锁并 reject 等待方
+  delete(key: string): void                                     // 只使缓存失效；绝不触碰在途锁
 }
 ```
 
-- **`MemoryStore`（MVP）**：`Map<string, Entry>` + 懒过期（查询时按 `expiresAt` 判断）+ `maxEntries` 上限（超出按 `createdAt` 淘汰最旧）。无外部依赖，零网络
-- **RedisProvider（后续）**：同一接口，key → JSON 序列化 Entry，配 TTL 原生过期；按需扩展，不进 MVP
+- **`MemoryStore`（MVP，P0 加固）**：`executing` 锁表与 `succeeded` 缓存表分开管理。执行锁**永不**因缓存容量/TTL 被淘汰；`maxEntries` 只约束成功缓存（超出按 `createdAt` 淘汰最旧已完成项），`maxInFlight` 约束在途并发（打满时 `reserve` 返回 null → 结构化容量错误，不执行副作用）。settle/fail 带 owner 校验，旧 owner 晚到的完成/失败不会覆盖或删除新记录。无外部依赖，零网络
+- **RedisProvider（后续）**：跨进程需存储端原子 claim/CAS 与租约（见审计「未来持久化版」），不能沿用本地 Map 的同步假设；按需扩展，不进 MVP
 
 ## ⑥ 危险场景清单（= 单元测试矩阵）
 
@@ -140,7 +147,7 @@ interface IdempotencyStore {
 | 7 | keyArg 缺失 | 回退 request fingerprint |
 | 8 | 非 opt-in 工具 | 零影响透传（无 rule 匹配 = 插件空转） |
 | 9 | 复用结果附加提示 | post-execute `additionalContexts` 携带 reused 说明（模型可见） |
-| 10 | fail-loud 配置校验 | 非法 mode / ttl / maxEntries / 空 rules 数组 → 加载即抛错 |
+| 10 | fail-loud 配置校验 | 非法 mode / ttl / maxEntries / maxInFlight / 空 rules 数组 → 加载即抛错 |
 
 ## 与套件的关系
 

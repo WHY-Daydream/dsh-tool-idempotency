@@ -11,6 +11,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import { fingerprintOf } from './canonicalize.js'
 import { MemoryStore } from './stores/memory.js'
 
 export const name = 'tool-idempotency'
@@ -37,8 +38,14 @@ export interface Rule {
 export interface Config {
   /** Cached-result TTL in seconds (default 3600). */
   ttl?: number
-  /** MemoryStore entry cap (default 1024). */
+  /** Succeeded-result cache cap (default 1024); evicting the cache never touches in-flight locks. */
   maxEntries?: number
+  /**
+   * Simultaneous in-flight execution cap (default 256). When saturated, a new
+   * guarded call is refused with a structured capacity error — it never runs
+   * its side effect unprotected.
+   */
+  maxInFlight?: number
   /** Opt-in tool rules; an empty list leaves the plugin inert. */
   rules?: Rule[]
 }
@@ -46,6 +53,7 @@ export interface Config {
 export const Config: z<Config> = z.object({
   ttl: z.number().default(3600),
   maxEntries: z.number().default(1024),
+  maxInFlight: z.number().default(256),
   rules: z.array(z.object({
     tool: z.string(),
     mode: z.union(['reuse', 'inFlightOnly', 'off'] as const).default('reuse'),
@@ -55,45 +63,13 @@ export const Config: z<Config> = z.object({
 
 /** Structured error code for same-key / different-arguments reuse. */
 const KEY_MISMATCH = 'IDEMPOTENCY_KEY_MISMATCH'
+/** Structured error code for a refused claim (in-flight capacity exhausted). */
+const CAPACITY_REJECTED = 'IDEMPOTENCY_CAPACITY_REJECTED'
 
 /** Compile one `*`-wildcard tool pattern to an anchored RegExp (every other regex metacharacter is matched literally). */
 function wildcardToRegExp(pattern: string): RegExp {
   const escaped = pattern.replace(/[|\\{}()[\]^$+?.]/g, String.raw`\$&`)
   return new RegExp(`^${escaped.replaceAll('*', '.*')}$`)
-}
-
-/**
- * Deep key-sort of a parsed-JSON value so argument objects differing only in
- * property order canonicalize identically (same idiom as
- * `@deepseek-ai/dsh-repeat-tool-reminder`).
- */
-function sortJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortJsonValue)
-  if (value !== null && typeof value === 'object') {
-    const record = value as Record<string, unknown>
-    const sorted: Record<string, unknown> = {}
-    for (const key of Object.keys(record).sort()) {
-      sorted[key] = sortJsonValue(record[key])
-    }
-    return sorted
-  }
-  return value
-}
-
-/** Deterministic FNV-1a 32-bit hash (hex) — dependency-free request fingerprinting. */
-function hashString(input: string): string {
-  let hash = 0x811c9dc5
-  for (let i = 0; i < input.length; i++) {
-    hash ^= input.charCodeAt(i)
-    hash = Math.imul(hash, 0x01000193)
-  }
-  return (hash >>> 0).toString(16).padStart(8, '0')
-}
-
-/** Request fingerprint: hash of tool name + canonicalized arguments. */
-function fingerprintOf(exec: ToolExecution): string {
-  const canonical = JSON.stringify(sortJsonValue(exec.arguments))
-  return hashString(`${exec.name}\u0000${canonical}`)
 }
 
 /** Resolve the idempotency key: explicit `keyArg` value, else the request fingerprint. */
@@ -114,6 +90,53 @@ function idempotencyError(message: string, code: string, errorName: string): Too
   }
 }
 
+/** Rejection carried by a joiner that leaves early because its own signal aborted. */
+class JoinerAbortedError extends Error {
+  constructor() {
+    super('idempotency join aborted by caller signal')
+    this.name = 'JoinerAbortedError'
+  }
+}
+
+/**
+ * Join an in-flight execution, but leave promptly when the joiner's own signal
+ * aborts — without cancelling the owner or touching the store (settlement stays
+ * owner-scoped). Matches ARCHITECTURE §④: an in-flight waiter that is aborted
+ * should abandon the wait instead of hanging the cancelled turn.
+ */
+function joinExecution(
+  ownerPromise: Promise<ToolExecutionResult>,
+  signal: AbortSignal | undefined,
+): Promise<ToolExecutionResult> {
+  if (signal === undefined || signal.aborted) {
+    return Promise.reject(new JoinerAbortedError())
+  }
+  return new Promise<ToolExecutionResult>((resolve, reject) => {
+    let settled = false
+    const onAbort = (): void => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', onAbort)
+      reject(new JoinerAbortedError())
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    ownerPromise.then(
+      (result) => {
+        if (settled) return
+        settled = true
+        signal.removeEventListener('abort', onAbort)
+        resolve(result)
+      },
+      (error: unknown) => {
+        if (settled) return
+        settled = true
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
+}
+
 /** A rule compiled for matching. */
 interface CompiledRule {
   regex: RegExp
@@ -129,11 +152,15 @@ interface CompiledRule {
 export function apply(ctx: Context, config: Config): void {
   const ttlSeconds = config.ttl as number
   const maxEntries = config.maxEntries as number
+  const maxInFlight = config.maxInFlight as number
   if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1) {
     throw new Error(`dsh-tool-idempotency: invalid ttl ${ttlSeconds} — must be an integer >= 1 (seconds)`)
   }
   if (!Number.isInteger(maxEntries) || maxEntries < 1) {
     throw new Error(`dsh-tool-idempotency: invalid maxEntries ${maxEntries} — must be an integer >= 1`)
+  }
+  if (!Number.isInteger(maxInFlight) || maxInFlight < 1) {
+    throw new Error(`dsh-tool-idempotency: invalid maxInFlight ${maxInFlight} — must be an integer >= 1`)
   }
   const ttlMs = ttlSeconds * 1000
   const rules: CompiledRule[] = (config.rules as Rule[]).map(rule => {
@@ -143,7 +170,7 @@ export function apply(ctx: Context, config: Config): void {
     return { regex: wildcardToRegExp(rule.tool), mode: rule.mode ?? 'reuse', keyArg: rule.keyArg }
   })
 
-  const store = new MemoryStore(maxEntries)
+  const store = new MemoryStore(maxEntries, maxInFlight)
 
   ctx.on('tools/execute', async (exec, next): Promise<ToolExecutionResult> => {
     const rule = rules.find(candidate => candidate.regex.test(exec.name))
@@ -163,7 +190,9 @@ export function apply(ctx: Context, config: Config): void {
           'IdempotencyKeyMismatch',
         )
       }
-      return existing.promise as Promise<ToolExecutionResult>
+      // Abort-aware join: leave promptly if this caller's signal aborts while
+      // the owner is still running — never cancel the owner or touch the store.
+      return joinExecution(existing.promise as Promise<ToolExecutionResult>, exec.signal)
     }
 
     if (existing !== undefined && existing.state === 'succeeded') {
@@ -182,30 +211,33 @@ export function apply(ctx: Context, config: Config): void {
       store.delete(key)
     }
 
-    // Fresh execution. The key is claimed in the same synchronous tick as the
-    // promise is created (the tool body only continues on later microtasks),
-    // so two concurrent callers cannot both observe a miss.
+    // Fresh execution. Claim the in-flight slot synchronously before the tool
+    // body can run, so two concurrent callers cannot both observe a miss.
+    const reservation = store.reserve(key, fingerprint)
+    if (reservation === null) {
+      // In-flight capacity is exhausted. Refuse loudly instead of running the
+      // side effect outside the guard or evicting an executing lock.
+      return idempotencyError(
+        `idempotency in-flight capacity reached (maxInFlight ${maxInFlight}) for tool \`${exec.name}\` — refusing the call; retry when a slot is free`,
+        CAPACITY_REJECTED,
+        'IdempotencyCapacityRejected',
+      )
+    }
+    const owner = reservation.owner
+
     const promise = (async (): Promise<ToolExecutionResult> => {
       try {
         const result = await next()
-        if (result.isError) {
-          store.delete(key) // FAILED: a retry must re-execute.
-        } else {
-          store.put(key, {
-            state: 'succeeded',
-            fingerprint,
-            createdAt: Date.now(),
-            expiresAt: Date.now() + ttlMs,
-            result,
-          })
-        }
+        // settle: success caches for replay; isError releases the lock without
+        // caching (a retry must re-execute). Owner-scoped: a stale completion
+        // can never overwrite or delete a newer record.
+        store.settle(key, owner, result, ttlMs)
         return result
       } catch (error) {
-        store.delete(key)
+        store.fail(key, owner, error)
         throw error
       }
     })()
-    store.put(key, { state: 'executing', fingerprint, createdAt: Date.now(), promise })
     return promise
   })
 }

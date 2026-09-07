@@ -56,7 +56,12 @@ function registerTool(ctx: Context, name: string, body: () => ContentBlock[] | P
 }
 
 /** Dispatch one tool call through the real pipeline. */
-async function executeTool(ctx: Context, name: string, argumentsValue: Record<string, unknown>): Promise<unknown> {
+async function executeTool(
+  ctx: Context,
+  name: string,
+  argumentsValue: Record<string, unknown>,
+  signal: AbortSignal = testToolSignal,
+): Promise<unknown> {
   return ctx.tools.execute({
     callId: await brandCallId(nextCallId()),
     name,
@@ -64,7 +69,7 @@ async function executeTool(ctx: Context, name: string, argumentsValue: Record<st
     // baseline, not in 0.1.2-rc.1+ (PCA F2c) — the erased `never` cast keeps this
     // suite compiling against both; the runtime value is unaffected.
     arguments: argumentsValue as unknown as never,
-    signal: testToolSignal,
+    signal,
   })
 }
 
@@ -75,6 +80,15 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
     resolve = res
   })
   return { promise, resolve }
+}
+
+/** Poll until `predicate` holds (deterministic readiness barrier for cancel tests). */
+async function until(predicate: () => boolean, timeoutMs = 300): Promise<void> {
+  const start = Date.now()
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) throw new Error('until(...) timed out')
+    await new Promise((resolve) => setTimeout(resolve, 1))
+  }
 }
 
 describe('opt-in gating', () => {
@@ -291,7 +305,183 @@ describe('fail-loud config validation', () => {
     await expect(failingHarness({ maxEntries: 0 })).rejects.toThrow(/maxEntries/)
   })
 
+  it('rejects a non-positive maxInFlight', async () => {
+    await expect(failingHarness({ maxInFlight: 0 })).rejects.toThrow(/maxInFlight/)
+  })
+
   it('rejects a rule without a tool pattern', async () => {
     await expect(failingHarness({ rules: [{ mode: 'reuse' }] } as Config)).rejects.toThrow(/tool/)
+  })
+})
+
+describe('P0 regression — cache capacity never evicts an in-flight lock (A/B/A, maxEntries=1)', () => {
+  it('a retry of an executing key joins instead of re-executing, even under cache pressure', async () => {
+    let attempts = 0
+    const gate = deferred<ContentBlock[]>()
+    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }], maxEntries: 1 })
+    registerTool(ctx, 'create_order', async () => {
+      attempts += 1
+      if (attempts === 1) return gate.promise // A: held in flight
+      return [{ type: 'text', text: `order-${attempts}` }] // B and later calls run immediately
+    })
+
+    const a1 = executeTool(ctx, 'create_order', { orderId: 'a' }) // A claims the lock (attempt 1)
+    // B is a different key: it claims and completes, filling the cache to cap.
+    // Pre-fix, B's cache write evicted A's executing lock here.
+    const b1 = await executeTool(ctx, 'create_order', { orderId: 'b' })
+    expect(b1).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-2' }] })
+
+    const a2 = executeTool(ctx, 'create_order', { orderId: 'a' }) // must JOIN A, not re-execute
+    gate.resolve([{ type: 'text', text: 'order-1' }])
+    const [ra1, ra2] = await Promise.all([a1, a2])
+    expect(attempts).toBe(2) // A ran once, B ran once — A's retry was deduplicated
+    expect(ra1).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
+    expect(ra2).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
+  })
+})
+
+describe('P0 regression — in-flight capacity is refused, never bypassed', () => {
+  it('returns a structured capacity error and does not run the side effect', async () => {
+    let attempts = 0
+    const gate = deferred<ContentBlock[]>()
+    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }], maxInFlight: 1 })
+    registerTool(ctx, 'create_order', async () => {
+      attempts += 1
+      return gate.promise
+    })
+
+    const first = executeTool(ctx, 'create_order', { orderId: 'a' }) // occupies the only slot
+    const refused = await executeTool(ctx, 'create_order', { orderId: 'b' })
+    expect(refused).toMatchObject({
+      isError: true,
+      error: { info: { code: 'IDEMPOTENCY_CAPACITY_REJECTED', name: 'IdempotencyCapacityRejected' } },
+    })
+    expect(attempts).toBe(1) // the refused call never reached the tool
+
+    gate.resolve([{ type: 'text', text: 'order-1' }])
+    await first
+    const after = await executeTool(ctx, 'create_order', { orderId: 'b' }) // slot free again
+    expect(after).toMatchObject({ isError: false })
+    expect(attempts).toBe(2)
+  })
+
+  it('joins a same-key retry while the in-flight table is full — only new keys are refused', async () => {
+    let attempts = 0
+    const gate = deferred<ContentBlock[]>()
+    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }], maxInFlight: 1 })
+    registerTool(ctx, 'create_order', async () => {
+      attempts += 1
+      return gate.promise
+    })
+
+    const a1 = executeTool(ctx, 'create_order', { orderId: 'a' }) // claims the only slot
+    const a2 = executeTool(ctx, 'create_order', { orderId: 'a' }) // same-key retry → join, never refuse
+    const refused = await executeTool(ctx, 'create_order', { orderId: 'b' }) // new key → capacity error
+    expect(refused).toMatchObject({
+      isError: true,
+      error: { info: { code: 'IDEMPOTENCY_CAPACITY_REJECTED' } },
+    })
+    expect(attempts).toBe(1) // the join and the refusal left the side effect at exactly one run
+
+    gate.resolve([{ type: 'text', text: 'order-1' }])
+    const [ra1, ra2] = await Promise.all([a1, a2])
+    expect(attempts).toBe(1)
+    expect(ra1).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
+    expect(ra2).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
+
+    const after = await executeTool(ctx, 'create_order', { orderId: 'b' }) // slot free → executes
+    expect(after).toMatchObject({ isError: false })
+    expect(attempts).toBe(2)
+  })
+
+  it('a synchronous downstream throw releases the owner — retry re-executes, no zombie lock', async () => {
+    let attempts = 0
+    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
+    registerTool(ctx, 'create_order', async () => {
+      attempts += 1
+      return [{ type: 'text', text: `order-${attempts}` }]
+    })
+    // Registered after the plugin loaded, this wrapper sits downstream of the
+    // idempotency guard and throws synchronously inside the guard's `next()` —
+    // the placeholder must have been claimed and must be released by the catch.
+    const removeThrower = ctx.on('tools/execute', () => {
+      throw new Error('sync-downstream-boom')
+    }) as unknown as () => void
+
+    const first = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(first).toMatchObject({ isError: true }) // the dispatcher converts the throw to a tool error result
+    expect(attempts).toBe(0) // the tool body was never reached
+
+    removeThrower()
+    const second = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(second).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
+    expect(attempts).toBe(1) // the failed claim released the lock; the retry executed exactly once
+  })
+})
+
+describe('P0 regression — own __proto__ argument fields are distinct requests', () => {
+  it('does not merge a request carrying an own __proto__ field into a plain one', async () => {
+    let attempts = 0
+    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
+    registerTool(ctx, 'create_order', async () => {
+      attempts += 1
+      return [{ type: 'text', text: `order-${attempts}` }]
+    })
+
+    // Legal JSON: JSON.parse creates `__proto__` as an own data property.
+    const withProto = JSON.parse('{"__proto__":{"x":1},"a":1}') as Record<string, unknown>
+    const without = JSON.parse('{"a":1}') as Record<string, unknown>
+
+    const r1 = await executeTool(ctx, 'create_order', withProto)
+    const r2 = await executeTool(ctx, 'create_order', without)
+    // Pre-fix the canonicalizer dropped the own field and r2 replayed r1 (attempts stayed 1).
+    expect(attempts).toBe(2)
+    expect(r2).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-2' }] })
+
+    // Identical requests still deduplicate, including the special key.
+    const r3 = await executeTool(ctx, 'create_order', withProto)
+    expect(attempts).toBe(2)
+    expect(r3).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
+  })
+})
+
+describe('P0 regression — an aborted waiter leaves the join promptly', () => {
+  it('aborting the waiter while the owner runs does not cancel the owner or fork the side effect', async () => {
+    let attempts = 0
+    const gate = deferred<ContentBlock[]>()
+    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
+    registerTool(ctx, 'create_order', async () => {
+      attempts += 1
+      return gate.promise
+    })
+
+    const ownerCtrl = new AbortController()
+    const waiterCtrl = new AbortController()
+    const owner = executeTool(ctx, 'create_order', { orderId: 'a' }, ownerCtrl.signal)
+    await until(() => attempts === 1) // owner 已启动并持有执行锁
+    const waiter = executeTool(ctx, 'create_order', { orderId: 'a' }, waiterCtrl.signal) // join
+    await until(() => waiterCtrl.signal.aborted === false) // 仅确保信号未预取消
+    await new Promise((resolve) => setTimeout(resolve, 10)) // 让 waiter 的 dispatch 进入 guard join 分支
+    waiterCtrl.abort()
+
+    // waiter 必须独立退出（owner 仍未完成）：加入超时护栏，防止回归为永久挂起
+    const outcome = await Promise.race([
+      waiter.then(
+        (value) => ({ kind: 'resolve' as const, isError: (value as { isError?: boolean })?.isError ?? false }),
+        () => ({ kind: 'reject' as const, isError: false }),
+      ),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('waiter did not leave within 300ms')), 300)),
+    ])
+    expect(attempts).toBe(1) // waiter 离开不影响 owner；无重复执行
+
+    gate.resolve([{ type: 'text', text: 'order-1' }])
+    const ownerResult = await owner
+    expect(ownerResult).toMatchObject({ isError: false })
+    expect(attempts).toBe(1)
+
+    // owner 完成后，同 key 调用正常重放（无僵尸锁、无串用）
+    const replay = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(replay).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
+    expect(['resolve', 'reject']).toContain(outcome.kind) // 本地宿主可能把早期退出映射为 isError 或传播 rejection
   })
 })

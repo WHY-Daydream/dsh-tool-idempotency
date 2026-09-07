@@ -1,0 +1,81 @@
+[
+  {
+    "id": "@why-daydream/dsh-tool-idempotency@0.1.2",
+    "name": "@why-daydream/dsh-tool-idempotency",
+    "version": "0.1.2",
+    "size": 14047,
+    "unpackedSize": 41491,
+    "shasum": "b5b6d73f853887ee7b4b4b6c6d0fef9ed965fa9d",
+    "integrity": "sha512-5n2QD58G/lCYu47FeYFzWHglEPK3+gu55lGMQV4NxDlYZb8DQBboFxLtOF8PTzfMNDdB2b2r2qw0l/aEhAZMuA==",
+    "filename": "why-daydream-dsh-tool-idempotency-0.1.2.tgz",
+    "files": [
+      {
+        "path": "LICENSE",
+        "size": 1069,
+        "mode": 420
+      },
+      {
+        "path": "README.en.md",
+        "size": 5518,
+        "mode": 420
+      },
+      {
+        "path": "README.md",
+        "size": 5064,
+        "mode": 420
+      },
+      {
+        "path": "cordis.patch.yml",
+        "size": 376,
+        "mode": 420
+      },
+      {
+        "path": "lib/canonicalize.d.ts",
+        "size": 1431,
+        "mode": 420
+      },
+      {
+        "path": "lib/canonicalize.js",
+        "size": 2147,
+        "mode": 420
+      },
+      {
+        "path": "lib/index.d.ts",
+        "size": 2142,
+        "mode": 420
+      },
+      {
+        "path": "lib/index.js",
+        "size": 6309,
+        "mode": 420
+      },
+      {
+        "path": "lib/invariant.d.ts",
+        "size": 663,
+        "mode": 420
+      },
+      {
+        "path": "lib/invariant.js",
+        "size": 1060,
+        "mode": 420
+      },
+      {
+        "path": "lib/stores/memory.d.ts",
+        "size": 5079,
+        "mode": 420
+      },
+      {
+        "path": "lib/stores/memory.js",
+        "size": 7439,
+        "mode": 420
+      },
+      {
+        "path": "package.json",
+        "size": 3194,
+        "mode": 420
+      }
+    ],
+    "entryCount": 13,
+    "bundled": []
+  }
+]

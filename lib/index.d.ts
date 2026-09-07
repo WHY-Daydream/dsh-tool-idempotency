@@ -30,8 +30,14 @@ export interface Rule {
 export interface Config {
     /** Cached-result TTL in seconds (default 3600). */
     ttl?: number;
-    /** MemoryStore entry cap (default 1024). */
+    /** Succeeded-result cache cap (default 1024); evicting the cache never touches in-flight locks. */
     maxEntries?: number;
+    /**
+     * Simultaneous in-flight execution cap (default 256). When saturated, a new
+     * guarded call is refused with a structured capacity error — it never runs
+     * its side effect unprotected.
+     */
+    maxInFlight?: number;
     /** Opt-in tool rules; an empty list leaves the plugin inert. */
     rules?: Rule[];
 }

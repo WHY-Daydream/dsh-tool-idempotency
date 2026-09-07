@@ -4,7 +4,9 @@ English | [中文](README.md)
 
 > Idempotency / duplicate-execution guard for DeepSeek Harness: when an agent retries a side-effecting tool call after a timeout or error, deduplicate by idempotency key and reuse the previous result instead of executing again.
 
-> **Status: MVP implemented (2026-08-17).** Core guard (`tools/execute` interception: cached-result reuse / in-flight joining / same-key-different-args fail-loud) plus 16 unit tests passing (vitest 4.1, oxlint 0 warnings, tsc 0 errors); E2E combination tests and npm release are next. The first two plugins in the suite — `dsh-chaos` (fault injection) and `dsh-tool-transaction` (Saga compensation) — are already released (npm 0.1.0); this is the third.
+> **Status: 0.1.3 release candidate (2026-09-07, accepted for review, NOT published).** npm `latest` is still 0.1.1 (contains both P0 defects that this candidate fixes). The 0.1.3 candidate = the latest-DSH compatibility patch + two P0 fixes + a new `maxInFlight` option — **not a "no runtime behavior change" compatibility patch**:
+> - **Behavior changes**: new `maxInFlight` (default 256) — when saturated, new different-key calls return `IDEMPOTENCY_CAPACITY_REJECTED`; `maxEntries` semantics narrowed to a succeeded-result cache cap.
+> - **Known limitations (accepted in this version)**: ① after a side effect has committed but the response is lost/timed out, a retry executes again (no exactly-once promise; rely on downstream idempotency/reconciliation); ② after Saga compensation, the same business key may replay a stale success (invalidate/generation mechanisms belong to 0.2.0). Both are FAIL reproductions documented in `compat/acceptance/acceptance-c-2026-09-07.md` and `CHANGELOG.md`; upgrade notes in `docs/UPGRADE.md`. Suite siblings `dsh-chaos` (fault injection) and `dsh-tool-transaction` (Saga compensation) are published (npm 0.1.0/0.1.1); this is the third plugin.
 
 ## Problem
 
@@ -66,9 +68,13 @@ dsh plugin --profile web add @why-daydream/dsh-tool-idempotency
 
 ```yaml
 idempotency:
-  keys: { create_order: explicit, send_email: hash }   # key source per tool
-  store: memory        # optional: memory | file (persistent)
-  ttl: 3600            # optional: key TTL
+  ttl: 3600            # optional: cache TTL (seconds), default 3600
+  maxEntries: 1024     # optional: succeeded-result cache cap; capacity eviction only ever hits the cache, never an in-flight lock
+  maxInFlight: 256     # optional: simultaneous in-flight execution cap; when saturated new calls are refused (IDEMPOTENCY_CAPACITY_REJECTED) without running
+  rules:
+    - tool: 'create_order'    # `*` wildcard; first matching rule wins
+      mode: 'reuse'           # reuse | inFlightOnly | off (default reuse)
+      keyArg: 'requestId'     # optional: explicit idempotency-key argument; absent → request fingerprint
 ```
 
 ```ts
