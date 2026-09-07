@@ -1,0 +1,76 @@
+=== dsh-tool-idempotency 0.2.0 全量复验 2026-09-07T19:10:58+08:00 ===
+env: node v22.22.0 npm 10.9.4
+git: 89f1624 0.2.0
+
+--- typecheck:tests ---
+
+> @why-daydream/dsh-tool-idempotency@0.2.0 typecheck:tests
+> tsc -b tsconfig.json --pretty false
+
+exit=0
+
+--- typecheck ---
+
+> @why-daydream/dsh-tool-idempotency@0.2.0 typecheck
+> tsc -b tsconfig.build.json --pretty false
+
+exit=0
+
+--- build ---
+
+> @why-daydream/dsh-tool-idempotency@0.2.0 build
+> tsc -b tsconfig.build.json
+
+exit=0
+
+--- test:p0 ---
+
+
+ RUN  v4.1.10 /mnt/workspace/DSH/dsh-tool-idempotency
+
+ ✓ tests/canonicalize.spec.ts (7 tests) 5ms
+ ✓ tests/store-regression.spec.ts (11 tests) 8ms
+
+ Test Files  2 passed (2)
+      Tests  18 passed (18)
+   Start at  19:11:16
+   Duration  964ms (transform 141ms, setup 0ms, import 198ms, tests 14ms, environment 0ms)
+
+
+--- test:unit ---
+ ✓ tests/index.spec.ts (23 tests) 1212ms
+     ✓ re-executes once the cached result has expired  1104ms
+
+ Test Files  4 passed (4)
+      Tests  69 passed (69)
+   Start at  19:11:17
+   Duration  2.26s (transform 848ms, setup 0ms, import 1.65s, tests 1.24s, environment 0ms)
+
+
+--- test:correctness ---
+
+ ✓ tests/correctness/business-state-change.spec.ts (5 tests) 1132ms
+     ✓ TTL 到期后重试返回当前业务状态（不再重放失效旧结果）  1105ms
+ ✓ tests/correctness/state-machine-0.2.0.spec.ts (8 tests) 1154ms
+     ✓ 普通抛错 → unknown：重试被阻止（STATE_UNKNOWN），且不随 TTL 自动解除  1105ms
+ ✓ tests/correctness/cache-boundary.spec.ts (7 tests) 2295ms
+     ✓ TTL 到期前重放，到期后重新执行  1116ms
+     ✓ 执行锁不受 TTL 影响：owner 挂起超过 TTL，同 key 重试仍 join 而非重新执行  1116ms
+
+ Test Files  12 passed (12)
+      Tests  68 passed (68)
+   Start at  19:11:21
+   Duration  3.02s (transform 3.29s, setup 0ms, import 4.58s, tests 6.59s, environment 1ms)
+
+
+--- test:e2e ---
+
+ RUN  v4.1.10 /mnt/workspace/DSH/dsh-tool-idempotency
+
+ ✓ tests/e2e.spec.ts (2 tests) 83ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  19:11:24
+   Duration  1.26s (transform 614ms, setup 0ms, import 750ms, tests 83ms, environment 0ms)
+

@@ -151,6 +151,10 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 
 ### 9.2 验证结果（完整套件 139/139 全绿，typecheck exit 0）
 
+> 复验日志（2026-09-07 全量重跑留档）：`compat/test/logs/full-0.2.0-verify-2026-09-07.log`
+> （typecheck:tests / typecheck / build exit 0；test:p0 18/18；test:unit 69/69；
+> test:correctness 68/68；test:e2e 2/2。139 = unit 69 + correctness 68 + e2e 2）。
+
 | 方向 | 结果 | 证据 |
 | --- | --- | --- |
 | 既有 11 个失败语义用例迁移至新契约 | **PASS** | index.spec ×2、store-regression ×2、cancel-abort ×2、replay-fidelity ×2、combo-timeout ×2、lifecycle（provide 同名守卫） |
@@ -171,6 +175,21 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 | K2 Saga 补偿后重放旧成功结果 | FAIL（已知限制） | **已修复**（invalidate + 代次 + 新操作身份语义） |
 | 单进程内存边界 | 保留 | 保留（Redis/多进程持久化不做，文档声明） |
 | 其余限制 | 保留 | 保留（跨重启无历史、指纹碰撞 O1、meta/additionalContexts 未覆盖等） |
+
+## 10. 基线复验记录（2026-09-07，分支 `0.2.0` 工作树 = 89f1624 + 未提交发布预备）
+
+> 目的：确认基线文档声称的事实当前仍成立（「确认基线后连续推进」的落点）。
+> 全部为本次实际执行结果，非转写历史 PASS。
+
+| 项 | 结果 | 证据 |
+| --- | --- | --- |
+| 本机全套件（typecheck:tests / typecheck / build / p0 / unit / correctness / e2e） | **PASS**：exit 0 ×3；18/18；69/69；68/68；2/2 | `compat/test/logs/full-0.2.0-verify-2026-09-07.log` |
+| fixture current-latest（registry 0.1.2-rc.1 闭包）重放 | **PASS**：baseline OK；regression 14/14；c3（PASS=3 + K1/K2 复现 3，FAIL=0）；agent-e2e executions=1 | `compat/fixtures/current-latest/`（npm ci 可重放） |
+| fixture prev-release（registry 0.1.1-rc.2 闭包）重放 | **PASS**：baseline OK；regression 14/14 | `compat/fixtures/prev-release-0.1.1-rc.2/` |
+| npm 0.1.3 发布产物哈希复验 | **PASS**：registry tarball sha256=`06b6ee24…` == 归档 tgz == 基线锁定值；sha512 与 dist.integrity 一致 | `baseline-0.1.3.md` §1；`npm pack @why-daydream/dsh-tool-idempotency@0.1.3` 实测 |
+| GitHub Actions 实际运行复验 | **PASS**：npm-publish run #4（34100982148，head=`bdde276`，event=push，tag v0.1.3）conclusion=success | api.github.com 复查（2026-09-07） |
+| 暴露 npm token 撤销（id 16ee9e） | **BLOCKED**（负责人官网操作；CLI 撤销被 403 拒绝，已实证） | `baseline-0.1.3.md` §6 |
+| 组合插件提交固定 | **PASS**（本次补记） | chaos `01130b5`、transaction `3cb9391`、bulkhead `c134237`、deepseek-harness `47f943859b`（见 baseline-0.1.3.md §2） |
 
 
 
