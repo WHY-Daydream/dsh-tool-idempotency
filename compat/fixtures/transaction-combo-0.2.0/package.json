@@ -1,0 +1,20 @@
+{
+  "name": "dsh-idempotency-fixture-transaction-combo-0.2.0",
+  "private": true,
+  "version": "0.0.0",
+  "description": "0.2.0 组合验收 fixture：transaction × idempotency 真实调用链（GATE-TI）。宿主 current-latest 线（cordis 4.0.2 / dsh-tools 0.1.2-rc.1 闭包）+ transaction 0.1.0（file: tgz）+ idempotency 0.2.0 候选（file: tgz）。仅固定精确版本；脚本内核对实际加载版本。",
+  "type": "module",
+  "dependencies": {
+    "@why-daydream/dsh-tool-idempotency": "file:../../acceptance/why-daydream-dsh-tool-idempotency-0.2.0.tgz",
+    "@why-daydream/dsh-tool-transaction": "file:/mnt/workspace/DSH/dsh-tool-transaction/why-daydream-dsh-tool-transaction-0.1.0.tgz",
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-tools": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-invariants": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-system-prompt": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-session": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-llm": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-agent-loop": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-agent-loop-testkit": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-tool-call-timeout-policy": "0.1.2-rc.1"
+  }
+}
