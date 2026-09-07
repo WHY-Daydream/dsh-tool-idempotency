@@ -190,6 +190,7 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 | GitHub Actions 实际运行复验 | **PASS**：npm-publish run #4（34100982148，head=`bdde276`，event=push，tag v0.1.3）conclusion=success | api.github.com 复查（2026-09-07） |
 | 暴露 npm token 撤销（id 16ee9e） | **BLOCKED**（负责人官网操作；CLI 撤销被 403 拒绝，已实证） | `baseline-0.1.3.md` §6 |
 | 组合插件提交固定 | **PASS**（本次补记） | chaos `01130b5`、transaction `3cb9391`、bulkhead `c134237`、deepseek-harness `47f943859b`（见 baseline-0.1.3.md §2） |
+| 分支推送 origin（0.2.0 / test/0.1.3-full-acceptance） | **BLOCKED**（环境/认证） | SSH publickey denied（`github-ssh/id_ed25519` 被 GitHub 拒绝，无 GitHub https token）；提交已本地落地（`dce90ba`），推送待负责人重新配置认证 |
 
 
 
