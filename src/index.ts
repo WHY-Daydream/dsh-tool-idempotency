@@ -92,16 +92,18 @@ const CAPACITY_REJECTED = 'IDEMPOTENCY_CAPACITY_REJECTED'
 const STATE_UNKNOWN = 'IDEMPOTENCY_STATE_UNKNOWN'
 /** Structured error code for a refused claim (unknown-tombstone budget exhausted). */
 const UNKNOWN_CAPACITY_REJECTED = 'IDEMPOTENCY_UNKNOWN_CAPACITY_REJECTED'
-/** Structured error code for a reconcile rejected by the fencing token
- *  (expectedExecutionId stale/ABA — old reconcile must never hit a newer execution). */
+/** Structured error code for a reconcile rejected by the execution fence
+ *  (expectedExecutionId stale/ABA — old reconcile must never hit a newer execution).
+ *  校验对象已是 executionId，名称沿袭 generation 时代（已在兼容面，保留不动；
+ *  未来如需可新增 IDEMPOTENCY_EXECUTION_MISMATCH 或随大版本调整）。 */
 const GENERATION_MISMATCH = 'IDEMPOTENCY_GENERATION_MISMATCH'
 
 /** 0.2.0 状态查询/解除/失效接口（挂载于 ctx.toolIdempotency）。 */
 export interface ToolIdempotencyApi {
   /** 查询 key 的当前状态（executing/succeeded/unknown），无记录返回 undefined。
-   *  `executionId` 为当前记录所属执行的 **fencing token**（每轮执行唯一、永不回退；
-   *  异步对账回传 `expectedExecutionId` 唯一锁定该轮执行——旧对账结果（ABA）永远
-   *  无法作用于新一轮执行）。 */
+   *  `executionId` 为当前记录所属执行的 **execution-scoped stale-operation fence /
+   *  CAS identity token**（每轮执行唯一、不复用；异步对账回传 `expectedExecutionId`
+   *  唯一锁定该轮执行——旧对账结果（ABA）永远无法作用于新一轮执行）。 */
   query(name: string, argumentsValue: Record<string, unknown>): {
     state: 'executing' | 'succeeded' | 'unknown'
     fingerprint: string

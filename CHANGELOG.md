@@ -31,11 +31,15 @@
   （settle/fail 后、无在途时的 release/confirm/invalidate 后即删），避免随 key 数
   无限增长。
 - **Saga 缓存失效（K2 修复方向）**：新增 `ctx.get('toolIdempotency')` 接口——
-  `query` / `release` / `confirm` / `invalidate`。
-  - `invalidate(key)`：清除 succeeded 缓存并递增**代次**；旧 owner 晚到结算（owner+代次
-    校验）不会把已失效结果写回。
-  - `confirm(key, result)`：下游确认已提交 → 写入验证过的结果（可重放）。
-  - `release(key)`：状态解除 → 后续同 key 重新执行。
+  `query` / `release` / `confirm` / `invalidate`（均按 name+args 解析 key）。
+  - `invalidate(name, args)`：清除 succeeded 缓存并递增**代次**；旧 owner 晚到结算
+    （owner+代次校验）不会把已失效结果写回。
+  - `confirm(name, args, result)`：下游确认已提交 → 写入验证过的结果（可重放）。
+  - `release(name, args)`：状态解除 → 后续同 key 重新执行。
+  - 对账三方法均校验 **fingerprint + expectedExecutionId**：`executionId` 为每轮执行
+    的 execution-scoped stale-operation fence / CAS identity token（`crypto.randomUUID()`，
+    不复用）——不同参数（另一请求）或旧执行（ABA）时拒绝且保持原状态，错误码
+    `IDEMPOTENCY_GENERATION_MISMATCH`；`query` 返回 `executionId` 供回传绑定。
   - **仅删除缓存≠可安全重执行**：补偿后需结合业务状态与新的操作身份决定后续动作。
 
 ### Fixed（相对 0.1.3 的 FAIL 复现）

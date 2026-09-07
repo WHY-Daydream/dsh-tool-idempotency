@@ -457,9 +457,17 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 | 提交/推送 | `6f40b36`/`9187061`/`ba99275`（P1 修复轮）+ `f6aca7f`/`012ad00`/`9877728`（fencing 轮）已推送远端 `0.2.0`（`1275ba9..9877728`） |
 | 干净安装（负责人侧） | 两条宿主线新生成锁文件 `npm ci` 成功、无 peer 绕过、各 14/14（§13 引言） |
 
-**发布状态**：3 个 P1 与 P1-3a/3b（fencing）已修复并有反例回归，但 **0.2.0 发布决策
-仍待负责人复核**（fencing 语义确认后解除 HOLD）；transaction×idempotency 实际组合
-验收仍 BLOCKED（上游 peer 冲突，手动 invalidate 不替代）。
+**发布状态（2026-09-07 负责人正式 verdict）**：
+- **P1-1 / P1-2 / P1-3 / P1-3a / P1-3b correctness gates：CLEARED**
+  （P1-3a ABA / token reuse CLOSED；P1-3b query / reconcile token consistency CLOSED；
+  P1-3 fingerprint reconciliation PASS；回归 194/194）。
+- **0.2.0 remains HOLD solely because `transaction × idempotency` real-composition
+  acceptance is blocked by upstream peer incompatibility**——HOLD 不再是自身
+  correctness 已知 bug，而是承诺的真实组合兼容性尚未拿到验收证据。
+- 若该组合是 0.2.0 正式兼容矩阵项 → 不发版；若团队决定从 0.2.0 scope 明确剥离 →
+  release note 标明 Known limitation：「transaction × idempotency composition is not
+  certified in 0.2.0 due to unresolved upstream peer dependency compatibility」，
+  之后 0.2.0 即具备解除 HOLD 的技术条件（决策权在团队/负责人）。
 
 ### 13.5 P1-3a/3b fencing token（executionId）——P1-3 关闭前提
 
@@ -486,6 +494,22 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
   - Case 3：query → release round trip（中间无状态变化必须成功，同源一致）；
   - Case 4：stale confirm/release/invalidate 全部拒绝（fencing 一致覆盖三个对账方法），
     新执行状态保持。
+
+**并发临界区检查（负责人复核项，2026-09-07）**：`release/confirm/invalidate` 的
+「读取 record → 校验 fingerprint + expectedExecutionId → mutation/delete」为**同步
+临界区**——中间无 await/callback/外部 I/O（单进程 JS Map 模型），compare + mutation
+不可被其他 execution 插入，ABA 风险关闭。**未来存储层换 Redis/Postgres 时必须升级为
+真 CAS**（`DELETE ... WHERE key=? AND fingerprint=? AND execution_id=?`，或 Redis
+Lua / WATCH-MULTI），不能沿用 GET→判断→DEL——作为分布式实现 invariant 记录。
+
+**术语精确化（记录到文档，非发布阻塞项）**：`executionId` 更准确叫法为
+**execution-scoped stale-operation fence / CAS identity token**——全局高概率唯一 UUID
++ equality CAS 对「stale reconciliation 不能作用于新 idempotency execution」目标完全
+足够；UUID 无顺序关系，**不宣称「单调递增 fencing token」**（单调递增语义留给未来
+分布式 fencing counter / `token <= lastSeenToken` 场景）。错误码
+`IDEMPOTENCY_GENERATION_MISMATCH` 实际校验对象已是 `expectedExecutionId`、语义略旧，
+**保留不动**（已在兼容面，改名收益低）；如需可未来新增 `IDEMPOTENCY_EXECUTION_MISMATCH`
+或随大版本调整。
 
 
 

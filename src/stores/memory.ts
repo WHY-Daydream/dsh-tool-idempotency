@@ -60,9 +60,11 @@ export interface StoreEntry {
   owner: number
   fingerprint: string
   /**
-   * 每轮执行的 **fencing token**（`crypto.randomUUID()`）：每次 reserve 分配新值、
-   * **永不回退且生命周期内唯一**（UUID 不复用）。对账 API（release/confirm/invalidate）
-   * 以 `fingerprint + expectedExecutionId` 唯一锁定某一轮执行——旧对账结果（ABA）永远
+   * 每轮执行的 **execution-scoped stale-operation fence / CAS identity token**
+   * （`crypto.randomUUID()`）：每次 reserve 分配新值、全局高概率唯一且**不复用**
+   * （UUID 无顺序关系——不宣称「单调递增 fencing token」，单调递增语义留给未来
+   * 分布式 fencing counter）。对账 API（release/confirm/invalidate）以
+   * `fingerprint + expectedExecutionId` 唯一锁定某一轮执行——旧对账结果（ABA）永远
    * 无法作用于新一轮执行。与 `generation`（key epoch，写回检测用，可随记录生命周期
    * 清理）职责**彻底拆开**：删除业务状态 ≠ 删除 fencing 历史。
    */

@@ -26,10 +26,16 @@
 
 | 方法 | 语义 |
 | --- | --- |
-| `query(name, args)` | 查询 key 状态（executing/succeeded/unknown），无记录返回 undefined |
-| `release(name, args)` | 状态解除（下游对账确认无未决提交）：清除 succeeded/unknown，后续同 key 重新执行 |
-| `confirm(name, args, result)` | 下游确认已提交：写入验证过的结果（可重放）。result 需为宿主导管可校验的完整物化形状（isError/content/value） |
-| `invalidate(name, args)` | 补偿流程：清除 succeeded 缓存并递增代次，防止旧执行写回陈旧结果 |
+| `query(name, args)` | 查询 key 状态（executing/succeeded/unknown），无记录返回 undefined；返回含 `executionId`（对账回传绑定） |
+| `release(name, args, opts?)` | 状态解除（下游对账确认无未决提交）：清除 succeeded/unknown，后续同 key 重新执行；校验 fingerprint + expectedExecutionId，冲突拒绝且保持原状态 |
+| `confirm(name, args, result, opts?)` | 下游确认已提交：写入验证过的结果（可重放）。result 需为宿主导管可校验的完整物化形状（isError/content/value）；校验 fingerprint + expectedExecutionId，冲突拒绝且保持原状态 |
+| `invalidate(name, args, opts?)` | 补偿流程：清除 succeeded 缓存并递增代次，防止旧执行写回陈旧结果；校验 fingerprint + expectedExecutionId，冲突拒绝且保持原状态 |
+
+> fencing 语义：`executionId` 为每轮执行分配的 **execution-scoped stale-operation
+> fence / CAS identity token**（`crypto.randomUUID()`，不复用，与 query 返回**同源**
+> ——观察值与 CAS 校验值来自同一 authoritative record）；旧对账结果（ABA）永远无法
+> 作用于新一轮执行；冲突错误码 `IDEMPOTENCY_GENERATION_MISMATCH`（名称沿袭
+> generation 时代，已在兼容面保留不动）。
 
 ### 3. Saga 补偿流程（K2 方向）
 
