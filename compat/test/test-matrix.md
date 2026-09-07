@@ -65,7 +65,7 @@ node compat/test/run-all.mjs
 | 方向 | 必测场景 | 验收标准 | 状态 |
 | --- | --- | --- | --- |
 | 请求隔离 | 相同 key 跨工具、Agent、session、工作区 | 按声明作用域隔离，不串用结果 | **PASS**（7/7，request-isolation.spec.ts） |
-| 参数判等 | 特殊 JSON 字段、嵌套参数、数组顺序、模拟哈希碰撞 | 不同请求不能错误合并 | **PASS（含已知限制实证）**（9/9，argument-equality.spec.ts） |
+| 参数判等 | 特殊 JSON 字段、嵌套参数、数组顺序、模拟哈希碰撞 | 不同请求不能错误合并 | **PASS（O1 已修复，见 §11.3）**（9/9，argument-equality.spec.ts） |
 | 取消与异常 | owner/waiter 取消、同步抛错、下游挂起 | waiter 可退出、owner 状态正确、无错误释放锁 | **PASS**（5/5，cancel-abort.spec.ts） |
 | 结果重放 | value、多模态内容、实际支持的附加字段 | 保留应重放内容，不复制错误身份/一次性上下文 | **PASS**（6/6，replay-fidelity.spec.ts；meta/additionalContexts 未覆盖=NOT_RUN 附注） |
 | 权限变化 | 首次允许，重试时权限被撤销 | 缓存命中不能绕过当前权限检查 | **PASS**（3/3，permission-change.spec.ts） |
@@ -84,7 +84,7 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 
 | 观测 | 结论 | 影响/去向 |
 | --- | --- | --- |
-| O1 指纹哈希碰撞（FNV-1a 32 位） | 实测可复现碰撞对（`{"x":"s406053133"}` 与 `{"d":{"inner":967754},"z":"s428930447"}` 同指纹 `12077584`），不同请求被当作相同 → 重放首次结果 | 契约「不同请求不能错误合并」=**FAIL**（已知限制，canonicalize.ts 审计 P1 已声明，0.2.0 升 SHA-256） |
+| O1 指纹哈希碰撞（FNV-1a 32 位） | 实测可复现碰撞对（`{"x":"s406053133"}` 与 `{"d":{"inner":967754},"z":"s428930447"}` 同指纹 `12077584`），不同请求被当作相同 → 重放首次结果 | 契约「不同请求不能错误合并」=**FAIL**（0.1.3 已知限制）；**0.2.0 已修复**：SHA-256 + `v1:` 版本字节，回归实证见 §11.3 |
 | O2 K2 实证 | 首次成功后外部补偿，同 key 重试重放旧「已创建」结果（attempts=1） | **FAIL**（已知限制，acceptance-c K2 复现的确定性用例版）；缓解路径（inFlightOnly/新 key/TTL 过期）PASS |
 | O3 权限门先于 idempotency | `tools/pre-execute` + ToolGuard 在 `tools/execute`（guard 监听处）之前执行；缓存命中路径上权限检查仍执行（gateChecks 计数不减） | **PASS**：缓存命中不绕过权限检查（机制确认） |
 | O4 宿主错误映射 | 本地宿主把 guard 传播的 rejection 与同步抛错映射为 `isError` 工具结果（非 promise rejection） | 观测记录：调用方以结果对象为准；waiter 取消可映射为 resolve 或 reject，套件两者均接受 |
@@ -174,7 +174,7 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 | K1 unknown：响应丢失后重试再次执行（effects=2） | FAIL（已知限制） | **已修复**（重试被阻止 + 对账路径）；上游写操作仍建议业务幂等 key 双重保障 |
 | K2 Saga 补偿后重放旧成功结果 | FAIL（已知限制） | **已修复**（invalidate + 代次 + 新操作身份语义） |
 | 单进程内存边界 | 保留 | 保留（Redis/多进程持久化不做，文档声明） |
-| 其余限制 | 保留 | 保留（跨重启无历史、指纹碰撞 O1、meta/additionalContexts 未覆盖等） |
+| 其余限制 | 保留 | 保留（跨重启无历史、meta/additionalContexts 未覆盖等；**O1 指纹碰撞已修复**，见 §11.3） |
 
 ## 10. 基线复验记录（2026-09-07，分支 `0.2.0` 工作树 = 89f1624 + 未提交发布预备）
 
@@ -191,6 +191,104 @@ typecheck:tests（tsc -b tsconfig.json）exit 0。
 | 暴露 npm token 撤销（id 16ee9e） | **BLOCKED**（负责人官网操作；CLI 撤销被 403 拒绝，已实证） | `baseline-0.1.3.md` §6 |
 | 组合插件提交固定 | **PASS**（本次补记） | chaos `01130b5`、transaction `3cb9391`、bulkhead `c134237`、deepseek-harness `47f943859b`（见 baseline-0.1.3.md §2） |
 | 分支推送 origin（0.2.0 / test/0.1.3-full-acceptance） | **BLOCKED**（环境/认证） | SSH publickey denied（`github-ssh/id_ed25519` 被 GitHub 拒绝，无 GitHub https token）；提交已本地落地（`dce90ba`），推送待负责人重新配置认证 |
+
+## 11. 0.2.0 候选包验收（2026-09-07，分支 `0.2.0`）
+
+> 本轮按负责人审阅意见执行：打包 0.2.0 候选 tgz → 隔离 fixture 确认实际加载版本 → 重跑；
+> K1/K2 用真实 pipeline 复现脚本验证业务结果已改变；O1 单独记录处理状态；
+> 组合/负载补齐显式参数。**发布决策仍待负责人，本阶段只做候选验收。**
+
+### 11.1 候选包与隔离 fixture
+
+| 项 | 值 |
+| --- | --- |
+| 候选 tgz | `compat/acceptance/why-daydream-dsh-tool-idempotency-0.2.0.tgz`（18554 B） |
+| sha256 | `26e0abd58bd44ce1540fdb664260b1a7277900d6879245a1ab11cecaa84be47c`（`tgz-0.2.0.sha256`，发布门禁同一命令 `sha256sum -c`） |
+| 归档内部 name/version | `@why-daydream/dsh-tool-idempotency` / `0.2.0`（tar 读 package/package.json 实测） |
+| 隔离 fixture | `compat/fixtures/current-latest-0.2.0/`：registry 0.1.2-rc.1 闭包（cordis 4.0.2 + dsh-* 0.1.2-rc.1）+ 本地 0.2.0 候选 tgz；**脚本内核对实际加载版本 === 0.2.0**（`[VERSION] plugin loaded = 0.2.0`） |
+| 0.1.3 对照 | `compat/fixtures/current-latest/`（0.1.3 tgz 闭包，未改动） |
+
+**运行结果（0.2.0 候选，全部实际执行）**
+
+| 脚本 | 结果 | 关键断言 |
+| --- | --- | --- |
+| baseline.mjs（无插件对照） | **PASS** | 无插件=无去重，pipeline 可用 |
+| regression.mjs | **PASS 14/14** | 其中 1 例按 0.2.0 契约改写：无证据失败→unknown 阻止重试，release 对账后重新执行（0.1.3 契约下该例为自动重执行 attempts=2） |
+| structured-result.mjs | **PASS** | value 重放逐字一致；meta/additionalContexts/concludesTurn 未覆盖（UNCOVERED，与 0.1.3 一致不宣称） |
+| c3-scenarios-0.2.0.mjs | **PASS 6/6** | K1 修复、证据契约、K2 修复、confirm 路径 + 2 例不变场景 |
+| agent-e2e.mjs | **PASS** | executions=1、toolResults=2、modelRequests=3（0.2.0 下 agent-loop 去重未破坏） |
+
+**K1/K2 A/B 对照（同一 pipeline 复现脚本族，业务结果已改变）**
+
+| 场景 | 0.1.3 候选（对照 fixture） | 0.2.0 候选 |
+| --- | --- | --- |
+| 提交后 abort（副作用已执行、响应丢失） | `KNOWN_DEFECT K1`：重试自动重执行 **effects=2** | **修复**：重试返回 `IDEMPOTENCY_STATE_UNKNOWN`，effects 不增；`release` 对账后才重新执行 |
+| Saga 补偿后同 key 重发 | `KNOWN_DEFECT K2`：重放旧「已创建」结果（creates=1） | **修复**：`invalidate` 后重新执行（creates=2）并观察到**新业务状态**（`recreated (#2) after compensation`） |
+| 带 NOT_COMMITTED 证据的失败 | 同普通错误（不区分） | failed_safe：无墓碑，重试直接重新执行（attempts=2） |
+| unknown → confirm 验证结果 | 无此路径 | 重放验证结果，不重执行 |
+
+> fixture `package-lock.json` 生成受网络阻塞（registry tarball 下载超时，元数据可用）；
+> node_modules 复用已验收闭包 + 候选 tgz 解包（等价 file: 安装内容），脚本版本校验保证
+> 加载即 0.2.0。锁文件待网络恢复后 `npm install --package-lock-only` 补生成（**BLOCKED-网络**）。
+
+### 11.2 unknown 五要点验证（对照验收标准逐条，PASS）
+
+| 验收要点 | 结果 | 证据 |
+| --- | --- | --- |
+| 提交后失败进入 unknown，重试不新增副作用 | **PASS** | state-machine（TTL=1 跨 1.1s 仍 blocked）+ c3-0.2.0 K1（effects 不增） |
+| 确认未提交后，才允许重新执行 | **PASS** | 新增 release 用例（state-machine + store 层）+ c3-0.2.0 release 路径 |
+| 确认已提交后，提供正确结果或明确状态 | **PASS** | confirm 用例（重放验证结果）+ c3-0.2.0 confirm 路径 |
+| unknown 不因 TTL、容量淘汰、旧 owner 回写意外解除 | **PASS**（含本轮修复） | TTL 用例；**新增墓碑豁免容量淘汰**（store 层 5 墓碑 > maxEntries=2 全保留）；新增陈旧 owner fail 不写回；代次校验 |
+| Saga 失效与原操作完成并发时，旧结果不重新进入缓存 | **PASS** | 代次保护 2 用例（失效先/后到达两序） |
+
+### 11.3 O1 指纹碰撞处理状态（单独记录）
+
+| 项 | 0.1.3 | 0.2.0 |
+| --- | --- | --- |
+| 指纹算法 | FNV-1a 32 位（实测碰撞对 `12077584` → 不同请求被错误合并，**FAIL 复现**） | **SHA-256 + 规范化版本字节 `v1:`**（node:crypto 内建，无新增依赖） |
+| 回归证据 | argument-equality「已知限制实证」断言 attempts=1 | 同一用例**翻转为修复实证**：attempts=2、结果各自独立、可分别重放；canonicalize.spec 新增碰撞对回归 |
+| 状态 | FAIL（核心正确性缺陷，曾被「全部测试通过」掩盖） | **PASS（已修复）**；进程内缓存，无持久化迁移影响 |
+| 文档 | audit P1「计划升级 SHA-256」 | UPGRADE.md §5 / CHANGELOG [0.2.0] 记录 |
+
+### 11.4 组合与压力测试显式参数（已测范围如实声明）
+
+**已测宿主**：① 本地 link（cordis 4.0.1 + dsh-* 0.1.0-rc.5）全套件；② registry 0.1.2-rc.1 闭包 fixture；③ registry 0.1.1-rc.2 闭包 fixture；④ 0.2.0 候选 fixture（registry 0.1.2-rc.1 闭包）。
+
+**已测组合**（tests/correctness/combo-*.spec.ts + e2e，本地宿主）：timeout×idempotency（两注册序）、bulkhead×idempotency（两注册序）、权限×idempotency、chaos×idempotency（e2e Scenario A/B）；transaction×idempotency **BLOCKED-upstream**（peer ERESOLVE 实证，本地宿主 e2e Scenario B 覆盖补偿流程）。
+
+**压力参数与指标**（tests/correctness/stress.spec.ts，屏障驱动确定性并发，非 sleep 猜测）：
+
+| 负载 | 参数 | 观测 |
+| --- | --- | --- |
+| 同 key 大量并发 | 500 并发 | 副作用恰 1 次，500 waiter 全部结算 |
+| 不同 key 大量并发 | 200 并发、maxInFlight=16 | executed=16、capacity-rejected=184，槽释放后恢复 |
+| 混合负载 | 100 执行 + 100 重放 | 真实执行=100；本机基线 61.0ms vs 插件 67.7ms（+11% 相对，不预设毫秒阈值） |
+| 大参数/大结果 | 2MB content | 完整缓存重放，内存可控 |
+| waiter 取消 | 5 轮 × 50 | 全部干净退出，heap 净增长 −2.1MB（宽松上界） |
+| 长期未完成 owner | maxInFlight=1，5 次新 key | 持续容量拒绝且诊断含 `maxInFlight 1`，owner 完成即恢复 |
+| 持续运行周期清空 | 8 轮 × 200 新 key churn（FIFO 1024） | heap 采样收敛（44,38,34,47,48,49,48,47 MB），无线性增长 |
+
+**诚实声明**：现有压力为秒级确定性并发 + 相对内存采样；**尚未做小时级连续运行与
+`--expose-gc` 精确泄漏检测**（test-matrix §8 已列为局限）→ 该门禁 **NOT_RUN**（后续阶段）。
+
+### 11.5 semver 0.2.x 拒绝范围（宿主澄清）
+
+- **“0.2.x 尚未发布”指 DSH 宿主**（`@deepseek-ai/dsh` 等 0.2.x 未发布，`targets.lock.json`
+  冻结事实），非本插件。
+- peer 联合范围对宿主 0.2.x **拒绝**：`tests/peer-range.spec.ts` 28 断言覆盖
+  `0.2.0` / `0.2.0-alpha.1` 不满足（`<0.2.0-0` 封顶每个成员）；**semver 层拒绝测试已执行**。
+- 运行时负例（装宿主 0.2.x 跑插件）在宿主 0.2.x 发布前不可构造 → **NOT_RUN**，不阻塞
+  semver 拒绝范围测试结论。
+
+### 11.6 本轮改动清单
+
+- 代码：`src/canonicalize.ts`（SHA-256 + `v1:` 版本字节）；`src/stores/memory.ts`（墓碑
+  豁免容量淘汰、fail() 识别 NOT_COMMITTED 证据）；`src/index.ts`（Config 注释）。
+- 测试：canonicalize.spec（碰撞对回归）；argument-equality.spec（O1 实证翻转）；
+  state-machine-0.2.0.spec（+4：release 路径、容量豁免、陈旧 owner、抛错证据）；
+  store-regression.spec（+3 store 层契约）。
+- 候选产物：0.2.0 tgz + sha256；fixture `current-latest-0.2.0`（版本校验注入 + c3 新契约）。
+- 文档：UPGRADE.md §5、CHANGELOG [0.2.0]、本矩阵 §11。
 
 
 

@@ -232,3 +232,41 @@ describe('MemoryStore constructor validation', () => {
     expect(() => new MemoryStore(1, 0)).toThrow(/maxInFlight/)
   })
 })
+
+describe('MemoryStore 0.2.0 — unknown 墓碑与 failed_safe 证据（store 层契约）', () => {
+  it('fail() 抛错携带 NOT_COMMITTED 证据 → failed_safe：不留墓碑，重试可重新执行', () => {
+    const store = new MemoryStore(2)
+    const r = store.reserve('K', 'fp-k')
+    expect(r).not.toBeNull()
+    store.fail('K', r!.owner, { info: { name: 'NotCommitted', code: NOT_COMMITTED_CODE } })
+    expect(store.get('K')).toBeUndefined() // 无墓碑
+    expect(store.size).toBe(0)
+  })
+
+  it('fail() 无证据抛错 → unknown 墓碑：重试 blocked，容量压力不淘汰墓碑', () => {
+    const store = new MemoryStore(2) // maxEntries=2：墓碑豁免容量淘汰
+    for (let i = 0; i < 5; i++) {
+      const r = store.reserve(`K${i}`, `fp-${i}`)
+      store.fail(`K${i}`, r!.owner, new Error('boom'))
+    }
+    for (let i = 0; i < 5; i++) {
+      expect(store.get(`K${i}`)?.state).toBe('unknown')
+    }
+    expect(store.size).toBe(5) // 5 个墓碑全部保留（超过 maxEntries 也不淘汰）
+
+    store.release('K0')
+    expect(store.get('K0')).toBeUndefined() // 显式 release 是唯一解除路径
+    expect(store.get('K1')?.state).toBe('unknown') // 其余仍 blocked
+    expect(store.size).toBe(4)
+  })
+
+  it('release() 递增代次：陈旧 owner fail 不写回 unknown', () => {
+    const store = new MemoryStore(4)
+    const r = store.reserve('K', 'fp-k')
+    expect(r).not.toBeNull()
+    store.release('K') // 代次 → 2
+    store.fail('K', r!.owner, new Error('late boom'))
+    expect(store.get('K')).toBeUndefined() // 无墓碑写回
+    expect(store.size).toBe(0)
+  })
+})

@@ -33,6 +33,12 @@
   变为重试被阻止 + 显式对账路径）。
 - K2（Saga 补偿后一致性）：补偿流程可 `invalidate` 使原操作成功缓存失效，且代次机制
   防止旧执行写回陈旧结果。
+- **O1（指纹碰撞）**：请求指纹 FNV-1a 32 位 → **SHA-256**（+ 规范化版本字节 `v1:`）；
+  0.1.3 实测碰撞对不同请求不再被错误合并重放（`argument-equality.spec.ts` 回归实证）。
+- **unknown 墓碑豁免容量淘汰**：`maxEntries` 只约束 succeeded 缓存，unknown 墓碑永不
+  淘汰——容量压力不再静默解除防重复副作用标记（store/state-machine 补测覆盖）。
+- **failed_safe 证据可来自抛错**：抛 `HarnessError(message, 'IDEMPOTENCY_NOT_COMMITTED')`
+  与返回带证据码的错误结果等效（宿主保留 `error.info.code`）；无证据一律 unknown。
 
 ### 迁移注意
 

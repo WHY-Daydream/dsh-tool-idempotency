@@ -23,7 +23,6 @@ import type { ToolExecution } from '@deepseek-ai/dsh-tools';
 export declare function sortJsonValue(value: unknown): unknown;
 /**
  * Request fingerprint: hash of tool name + canonicalized arguments.
- * 32-bit FNV-1a is a cheap dedup hint, not a collision-proof equality proof
- * (see audit P1 — SHA-256 + canonical-version byte are the planned upgrade).
+ * SHA-256 + 规范化版本字节；碰撞概率可忽略，不同请求不得错误合并（0.2.0 契约）。
  */
 export declare function fingerprintOf(exec: ToolExecution): string;

@@ -120,23 +120,24 @@ describe('参数判等：边界值', () => {
   })
 })
 
-describe('参数判等：模拟哈希碰撞（FNV-1a 32 位）', () => {
-  // 实测可复现的指纹碰撞对（src/canonicalize.ts 的 FNV-1a 32 位）：
+describe('参数判等：哈希碰撞回归（0.2.0 SHA-256 修复 O1）', () => {
+  // 0.1.3 FNV-1a 实测可复现的指纹碰撞对（审计 P1/O1）：
   //   {x:"s406053133"}          → canonical {"x":"s406053133"}
   //   {d:{inner:967754},z:"s428930447"} → canonical {"d":{"inner":967754},"z":"s428930447"}
-  // 两者规范字符串不同，但指纹同为 12077584。
+  // 两者规范字符串不同；0.1.3 下指纹同为 12077584 → 不同请求被错误合并重放。
+  // 0.2.0 升级 SHA-256 后该对必须区分。
   const COLLISION_A = { x: 's406053133' } as Record<string, unknown>
   const COLLISION_B = { d: { inner: 967754 }, z: 's428930447' } as Record<string, unknown>
 
-  it('碰撞对确实不同但指纹相同（前置断言）', () => {
+  it('碰撞对在 SHA-256 下指纹不同（前置断言）', () => {
     const fa = fingerprintOf({ name: 'create_order', arguments: COLLISION_A } as never)
     const fb = fingerprintOf({ name: 'create_order', arguments: COLLISION_B } as never)
     expect(JSON.stringify(COLLISION_A)).not.toBe(JSON.stringify(COLLISION_B))
-    expect(fa).toBe(fb)
-    expect(fa).toBe('12077584')
+    expect(fa).not.toBe(fb)
+    expect(fa).toMatch(/^v1:[0-9a-f]{64}$/)
   })
 
-  it('0.1.3 已知限制实证：指纹碰撞被当作相同请求重放（不同请求被错误合并）', async () => {
+  it('0.2.0 修复实证：碰撞对不同请求不再错误合并（各自执行，无重放串用）', async () => {
     let attempts = 0
     const records: string[] = []
     const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
@@ -148,13 +149,19 @@ describe('参数判等：模拟哈希碰撞（FNV-1a 32 位）', () => {
     const r1 = await executeTool(ctx, 'create_order', COLLISION_A)
     const r2 = await executeTool(ctx, 'create_order', COLLISION_B)
     console.log(
-      '[KNOWN-LIMITATION] fingerprint collision: A=%j B=%j fp=%s → attempts=%d (0.1.3 FNV-1a 非防碰撞，审计 P1 已计划升级 SHA-256)',
-      COLLISION_A, COLLISION_B, fingerprintOf({ name: 'create_order', arguments: COLLISION_A } as never), attempts,
+      '[O1-FIXED] collision pair: A=%j B=%j fpA=%s fpB=%s → attempts=%d (SHA-256 无碰撞，各自执行)',
+      COLLISION_A, COLLISION_B,
+      fingerprintOf({ name: 'create_order', arguments: COLLISION_A } as never),
+      fingerprintOf({ name: 'create_order', arguments: COLLISION_B } as never),
+      attempts,
     )
-    // 0.1.3 实际行为：碰撞被当作相同请求 → 重放首次结果（不同请求错误合并）。
-    // 契约验收「不同请求不能错误合并」= FAIL（已知限制，canonicalize.ts 审计 P1 明文声明）。
-    expect(attempts).toBe(1)
-    expect(records).toEqual(['exec-1'])
-    expect(r2).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
+    // 契约验收「不同请求不能错误合并」= PASS（0.2.0 修复）
+    expect(attempts).toBe(2)
+    expect(records).toEqual(['exec-1', 'exec-2'])
+    expect(r2).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-2' }] })
+    // 各自可独立重放
+    const replayB = await executeTool(ctx, 'create_order', COLLISION_B)
+    expect(attempts).toBe(2)
+    expect(replayB).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-2' }] })
   })
 })

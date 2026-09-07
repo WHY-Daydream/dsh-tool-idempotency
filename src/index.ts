@@ -49,7 +49,8 @@ export interface Rule {
 export interface Config {
   /** Cached-result TTL in seconds (default 3600). */
   ttl?: number
-  /** Succeeded-result cache cap (default 1024); evicting the cache never touches in-flight locks. */
+  /** Succeeded-result cache cap (default 1024); evicting the cache never touches
+   *  in-flight locks, and unknown tombstones are exempt from this cap. */
   maxEntries?: number
   /**
    * Simultaneous in-flight execution cap (default 256). When saturated, a new

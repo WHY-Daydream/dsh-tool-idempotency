@@ -8,6 +8,8 @@
  * @module @why-daydream/dsh-tool-idempotency/canonicalize
  */
 
+import { createHash } from 'node:crypto'
+
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 
 /**
@@ -35,22 +37,29 @@ export function sortJsonValue(value: unknown): unknown {
   return value
 }
 
-/** Deterministic FNV-1a 32-bit hash (hex) — dependency-free request fingerprinting. */
+/**
+ * Fingerprint canonicalization version byte. Bumped whenever the canonical
+ * serialization or hash changes, so in-process cache keys from an older plugin
+ * version can never be mistaken for the new format (cross-restart persistence
+ * is out of scope, but the byte keeps the contract future-proof).
+ */
+const CANONICAL_VERSION = 'v1'
+
+/**
+ * Deterministic SHA-256 (hex) request fingerprint.
+ *
+ * 0.2.0: FNV-1a 32 位升级为 SHA-256——消除实测可复现的指纹碰撞（O1，审计 P1）：
+ * 不同参数请求不再因哈希碰撞被错误合并重放。node:crypto 为 Node 内建，无新增依赖。
+ */
 function hashString(input: string): string {
-  let hash = 0x811c9dc5
-  for (let i = 0; i < input.length; i++) {
-    hash ^= input.charCodeAt(i)
-    hash = Math.imul(hash, 0x01000193)
-  }
-  return (hash >>> 0).toString(16).padStart(8, '0')
+  return createHash('sha256').update(input).digest('hex')
 }
 
 /**
  * Request fingerprint: hash of tool name + canonicalized arguments.
- * 32-bit FNV-1a is a cheap dedup hint, not a collision-proof equality proof
- * (see audit P1 — SHA-256 + canonical-version byte are the planned upgrade).
+ * SHA-256 + 规范化版本字节；碰撞概率可忽略，不同请求不得错误合并（0.2.0 契约）。
  */
 export function fingerprintOf(exec: ToolExecution): string {
   const canonical = JSON.stringify(sortJsonValue(exec.arguments))
-  return hashString(`${exec.name}\u0000${canonical}`)
+  return `${CANONICAL_VERSION}:${hashString(`${exec.name}\u0000${canonical}`)}`
 }

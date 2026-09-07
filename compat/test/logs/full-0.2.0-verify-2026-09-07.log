@@ -74,3 +74,24 @@ exit=0
    Start at  19:11:24
    Duration  1.26s (transform 614ms, setup 0ms, import 750ms, tests 83ms, environment 0ms)
 
+
+=== 复跑（O1 修复 + 五要点补测后）2026-09-07T19:56:06+08:00 ===
+git: 06766b2 0.2.0
+--- typecheck:tests ---
+
+--- typecheck ---
+
+--- build ---
+
+--- p0 ---
+ Test Files  2 passed (2)
+      Tests  22 passed (22)
+--- unit ---
+ Test Files  4 passed (4)
+      Tests  73 passed (73)
+--- correctness ---
+ Test Files  12 passed (12)
+      Tests  72 passed (72)
+--- e2e ---
+ Test Files  1 passed (1)
+      Tests  2 passed (2)

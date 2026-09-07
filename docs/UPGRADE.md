@@ -44,6 +44,19 @@
 - 不做 Redis / 多进程持久化；unknown/succeeded 状态仍是**单进程内存语义**。
 - 跨重启边界：进程重启后状态丢失，与 0.1.3 一致（文档已声明）。
 
+### 5. 0.2.0 补强项（验收期新增）
+
+- **O1 指纹碰撞修复**：请求指纹由 FNV-1a 32 位升级为 **SHA-256**（node:crypto 内建，
+  无新增依赖），并加规范化版本字节 `v1:`。0.1.3 实测碰撞对（`12077584`）不再碰撞，
+  不同参数请求不得错误合并（进程内缓存，无持久化迁移影响）。
+- **unknown 墓碑豁免容量淘汰**：`maxEntries` 只约束 succeeded 缓存；unknown 墓碑
+  **永不淘汰**（淘汰=静默解除=延迟重复副作用）。代价：未对账的 unknown key 会持续
+  占内存（每枚墓碑仅 key+指纹，极小），**对账（release/confirm）即其生命周期**；
+  长期不决的 key 需操作方定期对账。`query` 可观测、`release`/`confirm` 可解除。
+- **failed_safe 证据可来自抛错**：工具抛 `HarnessError(message, 'IDEMPOTENCY_NOT_COMMITTED')`
+  （宿主会保留 `error.info.code`）或返回带证据码的错误结果均可进入 failed_safe；
+  普通 Error 的自定义字段会被宿主错误映射丢弃，不能作为证据（无证据→unknown）。
+
 ---
 
 ## 0.1.3 升级说明（原始内容）

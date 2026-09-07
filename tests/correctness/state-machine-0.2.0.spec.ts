@@ -13,6 +13,7 @@
 
 import { describe, expect, it } from 'vitest'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { NOT_COMMITTED_CODE } from '../../src/index.js'
 import { deferred, executeTool, idempotencyApi, registerTool, tick, toolHarness, until } from './harness.js'
 
@@ -182,5 +183,88 @@ describe('0.2.0 Saga 缓存失效：invalidate + 代次', () => {
     const r2 = await executeTool(ctx, 'create_order', { orderId: 'a' })
     expect(r2).toMatchObject({ isError: false }) // 重新执行
     expect(attempts).toBe(2)
+  })
+})
+
+describe('0.2.0 unknown 五要点补测：确认未提交后才允许重新执行', () => {
+  it('release(key) 解除 unknown：对账确认未提交后，同 key 重新执行（非阻止、非重放）', async () => {
+    let attempts = 0
+    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
+    registerTool(ctx, 'create_order', async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('boom')
+      return [{ type: 'text', text: `order-${attempts}` }]
+    })
+    await executeTool(ctx, 'create_order', { orderId: 'a' }).catch(() => undefined)
+    expect(idempotencyApi(ctx).query('create_order', { orderId: 'a' })?.state).toBe('unknown')
+
+    idempotencyApi(ctx).release('create_order', { orderId: 'a' }) // 下游对账：确认未提交 → 解除
+    expect(idempotencyApi(ctx).query('create_order', { orderId: 'a' })).toBeUndefined()
+
+    const r2 = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(r2).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-2' }] })
+    expect(attempts).toBe(2) // 确认未提交后允许重新执行
+  })
+
+  it('容量淘汰豁免：maxEntries 压力下 unknown 墓碑不被淘汰（不静默解除防重复副作用标记）', async () => {
+    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }], maxEntries: 2 })
+    registerTool(ctx, 'create_order', async () => {
+      throw new Error('boom')
+    })
+    for (let i = 0; i < 5; i++) {
+      await executeTool(ctx, 'create_order', { orderId: `k${i}` }).catch(() => undefined)
+    }
+    // 5 个不同 key 全部失败 → 5 个墓碑全部保留（远超市容量 maxEntries=2 也不淘汰）
+    for (let i = 0; i < 5; i++) {
+      const retry = await executeTool(ctx, 'create_order', { orderId: `k${i}` })
+      expect(retry).toMatchObject({ isError: true, error: { info: { code: 'IDEMPOTENCY_STATE_UNKNOWN' } } })
+    }
+    // 显式 release 才是唯一解除路径：仅被解除的 key 可重新执行
+    idempotencyApi(ctx).release('create_order', { orderId: 'k3' })
+    await executeTool(ctx, 'create_order', { orderId: 'k3' }).catch(() => undefined)
+    for (let i = 0; i < 5; i++) {
+      const retry = await executeTool(ctx, 'create_order', { orderId: `k${i}` })
+      expect(retry).toMatchObject({ isError: true, error: { info: { code: 'IDEMPOTENCY_STATE_UNKNOWN' } } })
+    }
+  })
+
+  it('陈旧 owner 晚到抛错不写回 unknown（release 解除后旧执行失败不重新上锁）', async () => {
+    let attempts = 0
+    const gate = deferred<ContentBlock[]>()
+    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
+    registerTool(ctx, 'create_order', async () => {
+      attempts += 1
+      if (attempts === 1) return gate.promise // 首次挂起
+      return [{ type: 'text', text: `order-${attempts}` }]
+    })
+    const owner = executeTool(ctx, 'create_order', { orderId: 'a' })
+    await until(() => attempts === 1)
+
+    idempotencyApi(ctx).release('create_order', { orderId: 'a' }) // 代次 → 2
+    gate.reject(new Error('late boom')) // 旧 owner 随后失败
+    await owner.catch(() => undefined)
+    expect(idempotencyApi(ctx).query('create_order', { orderId: 'a' })).toBeUndefined() // 无 unknown 写回
+
+    const r2 = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(r2).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-2' }] })
+    expect(attempts).toBe(2) // 未被陈旧失败重新上锁
+  })
+
+  it('抛错携带 NOT_COMMITTED 证据（HarnessError code，宿主保留 info）→ failed_safe：无墓碑，重试允许重新执行', async () => {
+    let attempts = 0
+    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
+    registerTool(ctx, 'create_order', async () => {
+      attempts += 1
+      if (attempts === 1) throw new HarnessError('not committed', NOT_COMMITTED_CODE)
+      return [{ type: 'text', text: `order-${attempts}` }]
+    })
+    const r1 = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    // 宿主把 HarnessError 映射为 isError 结果并保留 error.info.code（证据契约的唯一真实路径）
+    expect(r1).toMatchObject({ isError: true, error: { info: { code: NOT_COMMITTED_CODE } } })
+    expect(idempotencyApi(ctx).query('create_order', { orderId: 'a' })).toBeUndefined() // failed_safe：未留墓碑
+
+    const r2 = await executeTool(ctx, 'create_order', { orderId: 'a' })
+    expect(r2).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-2' }] })
+    expect(attempts).toBe(2) // 有证据确定未提交 → 重试允许
   })
 })
