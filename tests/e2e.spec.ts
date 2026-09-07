@@ -23,7 +23,7 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import * as Chaos from '@why-daydream/dsh-chaos'
 import * as Transaction from '@why-daydream/dsh-tool-transaction'
 import * as Idempotency from '../src/index.js'
-import { MockAdapter, textResponse, toolCallResponse } from '../../deepseek-harness/packages/core/agent-loop/tests/mock-adapter.ts'
+import { MockAdapter, textResponse, toolCallResponse } from './mock-adapter.js'
 
 /**
  * Boot the core spine + chaos + idempotency, in that order — chaos registers

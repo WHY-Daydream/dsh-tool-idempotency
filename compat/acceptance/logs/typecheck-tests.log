@@ -1,0 +1,4 @@
+
+> @why-daydream/dsh-tool-idempotency@0.1.2 typecheck:tests
+> tsc -b tsconfig.json --pretty false
+

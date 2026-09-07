@@ -4,7 +4,17 @@
 
 > DeepSeek Harness 的幂等 / 重复执行守卫插件：Agent 因超时/重试重复调用副作用工具时，按幂等键（idempotency key）去重并复用历史结果，防止重复副作用。
 
-> **状态：MVP 已实现（2026-08-17）。** 核心守卫（`tools/execute` 拦截：缓存复用 / 并发加入 / 同 key 不同参数 fail-loud）+ 16 项单元测试通过（vitest 4.1，oxlint 0 告警，tsc 0 错误）；E2E 组合测试与 npm 发布待后续。系列前两款 `dsh-chaos`（故障注入）与 `dsh-tool-transaction`（Saga 补偿）已发布（npm 0.1.0），本插件为第三款。
+> **状态：0.1.3 发布候选（2026-09-07，已验收、未发布）。** npm `latest` 仍为 0.1.1
+> （含两个已修复的 P0 缺陷）。0.1.3 候选 = 最新 DSH 兼容 patch + 两个 P0 修复 +
+> 新配置 `maxInFlight`——**不是「无运行时行为变化的兼容 patch」**：
+> - **行为变化**：新增 `maxInFlight`（默认 256），打满时新的不同 key 调用返回
+>   `IDEMPOTENCY_CAPACITY_REJECTED`；`maxEntries` 语义收窄为「成功缓存上限」。
+> - **已知限制（本版接受）**：① 副作用已提交但响应丢失/超时后，重试会再次执行
+>   （不承诺 exactly-once，需下游幂等/对账）；② Saga 补偿成功后同业务 key 可能重放旧
+>   成功结果（invalidate/代次机制属 0.2.0）。两个限制均为 FAIL 复现项，详见
+>   `compat/acceptance/acceptance-c-2026-09-07.md` 与 `CHANGELOG.md`；升级注意见
+>   `docs/UPGRADE.md`。系列前两款 `dsh-chaos`（故障注入）与 `dsh-tool-transaction`
+>   （Saga 补偿）已发布（npm 0.1.0/0.1.1），本插件为第三款。
 
 ## 解决什么问题
 
@@ -66,9 +76,13 @@ dsh plugin --profile web add @why-daydream/dsh-tool-idempotency
 
 ```yaml
 idempotency:
-  keys: { create_order: explicit, send_email: hash }   # 按工具选择 key 来源
-  store: memory        # 可选：memory | file（持久化）
-  ttl: 3600            # 可选：key 有效期
+  ttl: 3600            # 可选：缓存 TTL（秒），默认 3600
+  maxEntries: 1024     # 可选：成功结果缓存上限；容量淘汰只作用于已完成缓存，绝不淘汰执行中锁
+  maxInFlight: 256     # 可选：同时在途执行上限；打满时拒绝新调用（IDEMPOTENCY_CAPACITY_REJECTED），不执行副作用
+  rules:
+    - tool: 'create_order'    # `*` 通配；首条匹配生效
+      mode: 'reuse'           # reuse | inFlightOnly | off（默认 reuse）
+      keyArg: 'requestId'     # 可选：显式幂等键字段；缺省用 request fingerprint
 ```
 
 ```ts

@@ -1,0 +1,1226 @@
+diff --git a/ARCHITECTURE.md b/ARCHITECTURE.md
+index 684d51c..dbb655d 100644
+--- a/ARCHITECTURE.md
++++ b/ARCHITECTURE.md
+@@ -35,7 +35,8 @@ create_order()        ← Agent 重试：订单被创建两次
+ ```yaml
+ idempotency:
+   ttl: 3600            # 缓存 TTL（秒），默认 3600
+-  maxEntries: 1024     # MemoryStore 上限，超出按 createdAt 淘汰最旧
++  maxEntries: 1024     # 成功结果缓存上限，超出按 createdAt 淘汰最旧；绝不淘汰执行中锁
++  maxInFlight: 256     # 同时在途执行上限（默认 256）；打满时新调用拒绝，不执行副作用
+   rules:
+     - tool: 'create_order'    # `*` 通配；首条匹配生效
+       mode: 'reuse'           # reuse | inFlightOnly | off（默认 reuse）
+@@ -51,6 +52,7 @@ idempotency:
+ | 码 | 含义 |
+ |---|---|
+ | `IDEMPOTENCY_KEY_MISMATCH` | 同 key 但 fingerprint 不同（同 key 不同参数）→ fail loud，不执行 |
++| `IDEMPOTENCY_CAPACITY_REJECTED` | 在途并发已达 `maxInFlight` → 拒绝该次调用（结构化错误），不执行副作用；执行锁既不淘汰也不绕过 |
+ | `IDEMPOTENCY_INFLIGHT_FAILED` | 等待并发调用时，in-flight 调用失败，等待方拿到同一失败结果 |
+ 
+ ## ③ 状态机
+@@ -73,6 +75,7 @@ idempotency:
+ ```text
+ key 查找
+ ├─ 无记录 → EXECUTING（记 in-flight promise）→ 执行 → SUCCEEDED / FAILED
++│         （在途已达 maxInFlight → 返回 IDEMPOTENCY_CAPACITY_REJECTED，绝不执行）
+ ├─ EXECUTING → fingerprint 一致？→ 等待 in-flight promise → 返回同一结果（并发去重）
+ │             fingerprint 不一致 → IDEMPOTENCY_KEY_MISMATCH（fail loud）
+ ├─ SUCCEEDED（TTL 内）→ fingerprint 一致？
+@@ -87,6 +90,8 @@ key 查找
+ 
+ - **FAILED 不重放**：失败结果不代表「副作用已完成」，重试必须重新执行；这也与 dsh-chaos 的 `dropResult`（副作用发生但结果丢失）互补——若工具真实执行过，重复副作用由 `dsh-tool-transaction` 补偿
+ - **并发去重**：in-flight promise 是权威；等待方不重新执行
++- **执行锁不可淘汰（P0）**：`maxEntries` 容量与 TTL 只作用于 SUCCEEDED 缓存；EXECUTING 锁不会被缓存压力挤掉，在途任务也不会因缓存 TTL 重入
++- **settle/fail 带 owner**：晚到的旧完成/旧失败不能删除或覆盖该 key 的新记录
+ - **缓存结果不可变**：复用前 deep-freeze，不落入后续 listener 的改写
+ 
+ ## ④ DSH Tool Pipeline 接入
+@@ -119,13 +124,15 @@ tool/call → tools/pre-execute（allow/deny/ask）
+ ```ts
+ interface IdempotencyStore {
+   get(key: string): Entry | undefined
+-  put(key: string, entry: Entry): void
+-  delete(key: string): void
++  reserve(key: string, fingerprint: string): Reservation | null // 在途槽；null = maxInFlight 打满
++  settle(key: string, owner: number, result: ToolExecutionResult, ttlMs: number): void // owner 校验：成功入缓存，isError 只释放锁
++  fail(key: string, owner: number, error: unknown): void        // owner 校验：释放锁并 reject 等待方
++  delete(key: string): void                                     // 只使缓存失效；绝不触碰在途锁
+ }
+ ```
+ 
+-- **`MemoryStore`（MVP）**：`Map<string, Entry>` + 懒过期（查询时按 `expiresAt` 判断）+ `maxEntries` 上限（超出按 `createdAt` 淘汰最旧）。无外部依赖，零网络
+-- **RedisProvider（后续）**：同一接口，key → JSON 序列化 Entry，配 TTL 原生过期；按需扩展，不进 MVP
++- **`MemoryStore`（MVP，P0 加固）**：`executing` 锁表与 `succeeded` 缓存表分开管理。执行锁**永不**因缓存容量/TTL 被淘汰；`maxEntries` 只约束成功缓存（超出按 `createdAt` 淘汰最旧已完成项），`maxInFlight` 约束在途并发（打满时 `reserve` 返回 null → 结构化容量错误，不执行副作用）。settle/fail 带 owner 校验，旧 owner 晚到的完成/失败不会覆盖或删除新记录。无外部依赖，零网络
++- **RedisProvider（后续）**：跨进程需存储端原子 claim/CAS 与租约（见审计「未来持久化版」），不能沿用本地 Map 的同步假设；按需扩展，不进 MVP
+ 
+ ## ⑥ 危险场景清单（= 单元测试矩阵）
+ 
+@@ -140,7 +147,7 @@ interface IdempotencyStore {
+ | 7 | keyArg 缺失 | 回退 request fingerprint |
+ | 8 | 非 opt-in 工具 | 零影响透传（无 rule 匹配 = 插件空转） |
+ | 9 | 复用结果附加提示 | post-execute `additionalContexts` 携带 reused 说明（模型可见） |
+-| 10 | fail-loud 配置校验 | 非法 mode / ttl / maxEntries / 空 rules 数组 → 加载即抛错 |
++| 10 | fail-loud 配置校验 | 非法 mode / ttl / maxEntries / maxInFlight / 空 rules 数组 → 加载即抛错 |
+ 
+ ## 与套件的关系
+ 
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index ead2fb7..eaf0d4f 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,40 @@
+ 本项目的版本历史。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
+ 版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
+ 
++## [Unreleased] — P0 正确性加固（2026-09-07 审计后源码改动）
++
++> **发布状态：未发布、未验证。** npm `latest=0.1.1`；本条目与下方 `[0.1.2]`
++> 条目描述的内容**均未进入 npm**。当前 `lib/` 仍是旧产物（P0 修复未重建），
++> vitest / tsc / build 执行被环境拦截（BLOCKED）。本条目不代表验收通过，
++> 验收命令见 `compat/README.md`「B 阶段验收口径」。
++
++### Fixed（源码层，待验证）
++
++- **执行中锁不再被缓存容量淘汰（P0）**：`MemoryStore` 拆分 `executing` 锁表与
++  `succeeded` 缓存表；`maxEntries` 只约束成功缓存（超出按 `createdAt` 淘汰最旧已完成项），
++  执行中记录永不因容量/TTL 被逐出，在途任务不会因缓存 TTL 重入。
++- **settle/fail 带 owner 校验（P0）**：只有持有该 key 的 claim 能完成/释放记录；
++  旧 owner 晚到的成功/失败不会覆盖或删除新记录。
++- **JSON 规范化保留自有字段（P0）**：`sortJsonValue` 改用无原型容器，`__proto__`、
++  `constructor`、`prototype` 等合法 JSON 自有字段不再在键排序时丢失；此前带这些字段的
++  请求可能与不带字段的请求被错误合并（错误复用结果）。规范逻辑抽到 `src/canonicalize.ts`。
++- **在途容量打满时显式拒绝（P0）**：新 key 在 `maxInFlight` 打满时返回结构化错误
++  `IDEMPOTENCY_CAPACITY_REJECTED`（`IdempotencyCapacityRejected`），不执行副作用、
++  不绕过守卫；**同 key 重试不受影响，仍 join 在途执行**。
++
++### Changed（行为变化，升级注意见 `docs/UPGRADE.md`）
++
++- 新增配置 **`maxInFlight`**（默认 `256`）：同时在途守卫执行上限。此前无独立在途上限，
++  高并发（>256 并发不同 key 的受守卫工具）场景下属于新增的容量拒绝行为。
++- `maxEntries` 语义收窄：从「总条目上限、可淘汰执行中锁」改为「成功缓存上限、
++  只淘汰已完成项」（前者是 P0 缺陷，见上）。
++
++### 边界与不做过度宣称
++
++- 「副作用已提交但响应丢失/报错」的 **unknown 场景未解决**：`isError`/抛错仍释放锁并允许
++  重试，可能重复执行副作用——本条目不改变该策略，重试安全需要下游幂等/事务证据。
++- 内存 store 升级/重启即丢失历史去重记录；多进程/持久化不在本版。
++
+ ## [0.1.2] - 2026-09-05
+ 
+ **Latest DSH compatibility fix** — 纯兼容性 patch release，无 production 行为变更
+diff --git a/README.en.md b/README.en.md
+index a374eef..2b80178 100644
+--- a/README.en.md
++++ b/README.en.md
+@@ -66,9 +66,13 @@ dsh plugin --profile web add @why-daydream/dsh-tool-idempotency
+ 
+ ```yaml
+ idempotency:
+-  keys: { create_order: explicit, send_email: hash }   # key source per tool
+-  store: memory        # optional: memory | file (persistent)
+-  ttl: 3600            # optional: key TTL
++  ttl: 3600            # optional: cache TTL (seconds), default 3600
++  maxEntries: 1024     # optional: succeeded-result cache cap; capacity eviction only ever hits the cache, never an in-flight lock
++  maxInFlight: 256     # optional: simultaneous in-flight execution cap; when saturated new calls are refused (IDEMPOTENCY_CAPACITY_REJECTED) without running
++  rules:
++    - tool: 'create_order'    # `*` wildcard; first matching rule wins
++      mode: 'reuse'           # reuse | inFlightOnly | off (default reuse)
++      keyArg: 'requestId'     # optional: explicit idempotency-key argument; absent → request fingerprint
+ ```
+ 
+ ```ts
+diff --git a/README.md b/README.md
+index c53c928..9f1451d 100644
+--- a/README.md
++++ b/README.md
+@@ -66,9 +66,13 @@ dsh plugin --profile web add @why-daydream/dsh-tool-idempotency
+ 
+ ```yaml
+ idempotency:
+-  keys: { create_order: explicit, send_email: hash }   # 按工具选择 key 来源
+-  store: memory        # 可选：memory | file（持久化）
+-  ttl: 3600            # 可选：key 有效期
++  ttl: 3600            # 可选：缓存 TTL（秒），默认 3600
++  maxEntries: 1024     # 可选：成功结果缓存上限；容量淘汰只作用于已完成缓存，绝不淘汰执行中锁
++  maxInFlight: 256     # 可选：同时在途执行上限；打满时拒绝新调用（IDEMPOTENCY_CAPACITY_REJECTED），不执行副作用
++  rules:
++    - tool: 'create_order'    # `*` 通配；首条匹配生效
++      mode: 'reuse'           # reuse | inFlightOnly | off（默认 reuse）
++      keyArg: 'requestId'     # 可选：显式幂等键字段；缺省用 request fingerprint
+ ```
+ 
+ ```ts
+diff --git a/package.json b/package.json
+index 6f12c12..c4dbd4b 100644
+--- a/package.json
++++ b/package.json
+@@ -26,6 +26,7 @@
+   },
+   "files": [
+     "lib/index.js",
++    "lib/canonicalize.js",
+     "lib/invariant.js",
+     "lib/stores/*.js",
+     "cordis.patch.yml",
+@@ -40,8 +41,12 @@
+   "scripts": {
+     "build": "tsc -b tsconfig.build.json",
+     "typecheck": "tsc -b tsconfig.build.json --pretty false",
++    "typecheck:tests": "tsc -b tsconfig.json --pretty false",
+     "test": "vitest run",
+     "test:watch": "vitest",
++    "test:unit": "vitest run tests/index.spec.ts tests/peer-range.spec.ts tests/canonicalize.spec.ts tests/store-regression.spec.ts",
++    "test:p0": "vitest run tests/canonicalize.spec.ts tests/store-regression.spec.ts",
++    "test:e2e": "vitest run tests/e2e.spec.ts",
+     "lint": "oxlint ."
+   },
+   "dependencies": {
+diff --git a/src/index.ts b/src/index.ts
+index b83fe84..566e27e 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -11,6 +11,7 @@
+ import type { Context } from '@deepseek-ai/cordis'
+ import z from '@deepseek-ai/schemastery'
+ import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
++import { fingerprintOf } from './canonicalize.js'
+ import { MemoryStore } from './stores/memory.js'
+ 
+ export const name = 'tool-idempotency'
+@@ -37,8 +38,14 @@ export interface Rule {
+ export interface Config {
+   /** Cached-result TTL in seconds (default 3600). */
+   ttl?: number
+-  /** MemoryStore entry cap (default 1024). */
++  /** Succeeded-result cache cap (default 1024); evicting the cache never touches in-flight locks. */
+   maxEntries?: number
++  /**
++   * Simultaneous in-flight execution cap (default 256). When saturated, a new
++   * guarded call is refused with a structured capacity error — it never runs
++   * its side effect unprotected.
++   */
++  maxInFlight?: number
+   /** Opt-in tool rules; an empty list leaves the plugin inert. */
+   rules?: Rule[]
+ }
+@@ -46,6 +53,7 @@ export interface Config {
+ export const Config: z<Config> = z.object({
+   ttl: z.number().default(3600),
+   maxEntries: z.number().default(1024),
++  maxInFlight: z.number().default(256),
+   rules: z.array(z.object({
+     tool: z.string(),
+     mode: z.union(['reuse', 'inFlightOnly', 'off'] as const).default('reuse'),
+@@ -55,6 +63,8 @@ export const Config: z<Config> = z.object({
+ 
+ /** Structured error code for same-key / different-arguments reuse. */
+ const KEY_MISMATCH = 'IDEMPOTENCY_KEY_MISMATCH'
++/** Structured error code for a refused claim (in-flight capacity exhausted). */
++const CAPACITY_REJECTED = 'IDEMPOTENCY_CAPACITY_REJECTED'
+ 
+ /** Compile one `*`-wildcard tool pattern to an anchored RegExp (every other regex metacharacter is matched literally). */
+ function wildcardToRegExp(pattern: string): RegExp {
+@@ -62,40 +72,6 @@ function wildcardToRegExp(pattern: string): RegExp {
+   return new RegExp(`^${escaped.replaceAll('*', '.*')}$`)
+ }
+ 
+-/**
+- * Deep key-sort of a parsed-JSON value so argument objects differing only in
+- * property order canonicalize identically (same idiom as
+- * `@deepseek-ai/dsh-repeat-tool-reminder`).
+- */
+-function sortJsonValue(value: unknown): unknown {
+-  if (Array.isArray(value)) return value.map(sortJsonValue)
+-  if (value !== null && typeof value === 'object') {
+-    const record = value as Record<string, unknown>
+-    const sorted: Record<string, unknown> = {}
+-    for (const key of Object.keys(record).sort()) {
+-      sorted[key] = sortJsonValue(record[key])
+-    }
+-    return sorted
+-  }
+-  return value
+-}
+-
+-/** Deterministic FNV-1a 32-bit hash (hex) — dependency-free request fingerprinting. */
+-function hashString(input: string): string {
+-  let hash = 0x811c9dc5
+-  for (let i = 0; i < input.length; i++) {
+-    hash ^= input.charCodeAt(i)
+-    hash = Math.imul(hash, 0x01000193)
+-  }
+-  return (hash >>> 0).toString(16).padStart(8, '0')
+-}
+-
+-/** Request fingerprint: hash of tool name + canonicalized arguments. */
+-function fingerprintOf(exec: ToolExecution): string {
+-  const canonical = JSON.stringify(sortJsonValue(exec.arguments))
+-  return hashString(`${exec.name}\u0000${canonical}`)
+-}
+-
+ /** Resolve the idempotency key: explicit `keyArg` value, else the request fingerprint. */
+ function resolveKey(exec: ToolExecution, keyArg: string | undefined): string {
+   if (keyArg !== undefined) {
+@@ -129,12 +105,16 @@ interface CompiledRule {
+ export function apply(ctx: Context, config: Config): void {
+   const ttlSeconds = config.ttl as number
+   const maxEntries = config.maxEntries as number
++  const maxInFlight = config.maxInFlight as number
+   if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1) {
+     throw new Error(`dsh-tool-idempotency: invalid ttl ${ttlSeconds} — must be an integer >= 1 (seconds)`)
+   }
+   if (!Number.isInteger(maxEntries) || maxEntries < 1) {
+     throw new Error(`dsh-tool-idempotency: invalid maxEntries ${maxEntries} — must be an integer >= 1`)
+   }
++  if (!Number.isInteger(maxInFlight) || maxInFlight < 1) {
++    throw new Error(`dsh-tool-idempotency: invalid maxInFlight ${maxInFlight} — must be an integer >= 1`)
++  }
+   const ttlMs = ttlSeconds * 1000
+   const rules: CompiledRule[] = (config.rules as Rule[]).map(rule => {
+     if (typeof rule.tool !== 'string' || rule.tool.length === 0) {
+@@ -143,7 +123,7 @@ export function apply(ctx: Context, config: Config): void {
+     return { regex: wildcardToRegExp(rule.tool), mode: rule.mode ?? 'reuse', keyArg: rule.keyArg }
+   })
+ 
+-  const store = new MemoryStore(maxEntries)
++  const store = new MemoryStore(maxEntries, maxInFlight)
+ 
+   ctx.on('tools/execute', async (exec, next): Promise<ToolExecutionResult> => {
+     const rule = rules.find(candidate => candidate.regex.test(exec.name))
+@@ -182,30 +162,33 @@ export function apply(ctx: Context, config: Config): void {
+       store.delete(key)
+     }
+ 
+-    // Fresh execution. The key is claimed in the same synchronous tick as the
+-    // promise is created (the tool body only continues on later microtasks),
+-    // so two concurrent callers cannot both observe a miss.
++    // Fresh execution. Claim the in-flight slot synchronously before the tool
++    // body can run, so two concurrent callers cannot both observe a miss.
++    const reservation = store.reserve(key, fingerprint)
++    if (reservation === null) {
++      // In-flight capacity is exhausted. Refuse loudly instead of running the
++      // side effect outside the guard or evicting an executing lock.
++      return idempotencyError(
++        `idempotency in-flight capacity reached (maxInFlight ${maxInFlight}) for tool \`${exec.name}\` — refusing the call; retry when a slot is free`,
++        CAPACITY_REJECTED,
++        'IdempotencyCapacityRejected',
++      )
++    }
++    const owner = reservation.owner
++
+     const promise = (async (): Promise<ToolExecutionResult> => {
+       try {
+         const result = await next()
+-        if (result.isError) {
+-          store.delete(key) // FAILED: a retry must re-execute.
+-        } else {
+-          store.put(key, {
+-            state: 'succeeded',
+-            fingerprint,
+-            createdAt: Date.now(),
+-            expiresAt: Date.now() + ttlMs,
+-            result,
+-          })
+-        }
++        // settle: success caches for replay; isError releases the lock without
++        // caching (a retry must re-execute). Owner-scoped: a stale completion
++        // can never overwrite or delete a newer record.
++        store.settle(key, owner, result, ttlMs)
+         return result
+       } catch (error) {
+-        store.delete(key)
++        store.fail(key, owner, error)
+         throw error
+       }
+     })()
+-    store.put(key, { state: 'executing', fingerprint, createdAt: Date.now(), promise })
+     return promise
+   })
+ }
+diff --git a/src/stores/memory.ts b/src/stores/memory.ts
+index a14badbf..c057d09 100644
+--- a/src/stores/memory.ts
++++ b/src/stores/memory.ts
+@@ -1,19 +1,33 @@
+ /**
+- * In-memory idempotency store (MVP). Succeeded entries expire lazily by TTL;
+- * failed entries are evicted on read; the oldest entry is evicted (FIFO) when
+- * `maxEntries` is exceeded.
++ * In-memory idempotency store (MVP, P0-hardened).
++ *
++ * Two budgets keep the duplicate-execution lock independent of the result
++ * cache:
++ * - `executing` table — one entry per in-flight guarded execution. Entries are
++ *   never evicted by cache pressure: evicting an in-flight lock would let a
++ *   retry duplicate a side effect (P0). `maxInFlight` bounds this table and a
++ *   saturated table refuses new claims instead of running unprotected.
++ * - `cache` (succeeded) — replayed within TTL, FIFO-evicted oldest-first when
++ *   over `maxEntries`.
++ *
++ * Settlements are owner-scoped: only the claim (`owner`) that holds a key may
++ * settle or release it, so a stale or late completion can never overwrite or
++ * delete a newer record for the same key. In-flight locks are released only by
++ * `settle`/`fail`; `delete` drops cached results and never touches a live lock.
+  * @module @why-daydream/dsh-tool-idempotency/stores/memory
+  */
+ 
+ import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+ 
+-/** One key's lifecycle record inside the store. */
++/** One key's lifecycle record, as observed through {@link MemoryStore.get}. */
+ export interface StoreEntry {
+-  /** Lifecycle state of the key (see ARCHITECTURE.md §③). */
+-  state: 'executing' | 'succeeded' | 'failed'
++  /** `executing` while the claim is in flight; `succeeded` while cached for replay. */
++  state: 'executing' | 'succeeded'
++  /** Identity of the claim that owns this record (stale settlements are ignored). */
++  owner: number
+   /** Request fingerprint bound to the key (same key + different fingerprint fails loud). */
+   fingerprint: string
+-  /** Wall-clock creation time (ms), used for FIFO eviction. */
++  /** Wall-clock creation time (ms), used for FIFO eviction of the cache. */
+   createdAt: number
+   /** Absolute expiry (ms); present while `state === 'succeeded'`. */
+   expiresAt?: number
+@@ -23,69 +37,199 @@ export interface StoreEntry {
+   result?: ToolExecutionResult
+ }
+ 
++/** A successfully reserved in-flight slot. */
++export interface Reservation {
++  /** Owner token to present when settling the reservation. */
++  owner: number
++  /** Join promise: settles with the execution's outcome when it settles. */
++  promise: Promise<ToolExecutionResult>
++}
++
++/** Executing-row internals (never returned as a mutable handle). */
++interface ExecutingEntry extends StoreEntry {
++  state: 'executing'
++  promise: Promise<ToolExecutionResult>
++  /** Settle hooks for the join promise (resolved on completion, rejected on throw). */
++  resolve: (result: ToolExecutionResult) => void
++  reject: (error: unknown) => void
++}
++
++/** Succeeded cache row. */
++interface SucceededEntry extends StoreEntry {
++  state: 'succeeded'
++  expiresAt: number
++  result: ToolExecutionResult
++}
++
+ /**
+- * Dependency-free `Map`-backed store with lazy expiry and a FIFO cap.
+- * `now` is injectable so TTL tests do not sleep.
++ * Dependency-free store with lazy cache expiry, a FIFO succeeded-cache cap and
++ * an independent in-flight cap. `now` is injectable so TTL tests do not sleep.
+  */
+ export class MemoryStore {
+-  private readonly entries = new Map<string, StoreEntry>()
++  private readonly executing = new Map<string, ExecutingEntry>()
++  private readonly cache = new Map<string, SucceededEntry>()
+   private readonly maxEntries: number
++  private readonly maxInFlight: number
+   private readonly now: () => number
++  private nextOwner = 1
+ 
+-  constructor(maxEntries: number, now: () => number = Date.now) {
++  /**
++   * @param maxEntries - succeeded-result cache cap (FIFO eviction; never affects in-flight locks).
++   * @param maxInFlight - simultaneous in-flight execution cap; overflow is refused, not evicted.
++   * @param now - clock for TTL / FIFO bookkeeping.
++   */
++  constructor(maxEntries: number, maxInFlight = 256, now: () => number = Date.now) {
+     if (!Number.isInteger(maxEntries) || maxEntries < 1) {
+       throw new Error(`dsh-tool-idempotency: invalid maxEntries ${maxEntries} — must be an integer >= 1`)
+     }
++    if (!Number.isInteger(maxInFlight) || maxInFlight < 1) {
++      throw new Error(`dsh-tool-idempotency: invalid maxInFlight ${maxInFlight} — must be an integer >= 1`)
++    }
+     this.maxEntries = maxEntries
++    this.maxInFlight = maxInFlight
+     this.now = now
+   }
+ 
+   /**
+-   * Look up a key, evicting entries that are no longer reusable: failed
+-   * entries (retry must re-execute) and succeeded entries past their TTL.
++   * Look up a key. Executing locks are always live (an in-flight task must not
++   * be re-entered by a cache-TTL decision). Succeeded entries past their TTL
++   * are dropped lazily and read as a miss.
+    * @param key - idempotency key.
+-   * @returns the live entry, or `undefined` for a miss.
++   * @returns the live record, or `undefined` for a miss.
+    */
+   get(key: string): StoreEntry | undefined {
+-    const entry = this.entries.get(key)
+-    if (entry === undefined) return undefined
+-    if (entry.state === 'failed') {
+-      this.entries.delete(key)
++    const live = this.executing.get(key)
++    if (live !== undefined) return live
++    const cached = this.cache.get(key)
++    if (cached === undefined) return undefined
++    if (cached.expiresAt !== undefined && this.now() > cached.expiresAt) {
++      this.cache.delete(key)
+       return undefined
+     }
+-    if (entry.state === 'succeeded' && entry.expiresAt !== undefined && this.now() > entry.expiresAt) {
+-      this.entries.delete(key)
+-      return undefined
++    return cached
++  }
++
++  /**
++   * Reserve an in-flight slot for `key` and register the join promise.
++   * @returns the reservation, or `null` when `maxInFlight` is saturated — the
++   * caller must surface a capacity error and MUST NOT run the side effect.
++   */
++  reserve(key: string, fingerprint: string): Reservation | null {
++    if (this.executing.has(key)) {
++      // Unreachable through the plugin listener (join / mismatch short-circuit
++      // first). Two live claims for one key would fork the side effect, so
++      // fail loud rather than let that happen silently.
++      throw new Error(
++        `dsh-tool-idempotency: duplicate in-flight claim for key ${JSON.stringify(key)} — join the existing execution instead of claiming again`,
++      )
+     }
+-    return entry
++    if (this.executing.size >= this.maxInFlight) return null
++    let resolve!: (result: ToolExecutionResult) => void
++    let reject!: (error: unknown) => void
++    const promise = new Promise<ToolExecutionResult>((res, rej) => {
++      resolve = res
++      reject = rej
++    })
++    const owner = this.nextOwner
++    this.nextOwner += 1
++    // Mark the join promise as handled at the source: when the claiming call
++    // fails with no joiner attached, `fail` rejecting this promise must not
++    // surface as an ambient unhandled rejection. Joiners awaiting the same
++    // promise still receive the rejection normally.
++    promise.catch(() => undefined)
++    this.executing.set(key, {
++      state: 'executing',
++      owner,
++      fingerprint,
++      createdAt: this.now(),
++      promise,
++      resolve,
++      reject,
++    })
++    return { owner, promise }
++  }
++
++  /**
++   * Settle an execution with its result. `isError` results release the lock
++   * without caching (a retry must re-execute); successful results release the
++   * lock and cache for replay. Stale settlements — an owner that no longer
++   * owns the key — are ignored.
++   * @param key - idempotency key.
++   * @param owner - owner token from {@link reserve}.
++   * @param result - the tool result.
++   * @param ttlMs - replay TTL applied to a successful cache write.
++   */
++  settle(key: string, owner: number, result: ToolExecutionResult, ttlMs: number): void {
++    const live = this.take(key, owner)
++    if (live === undefined) return
++    live.resolve(result)
++    if (!result.isError) this.cacheResult(key, owner, live.fingerprint, result, ttlMs)
+   }
+ 
+   /**
+-   * Insert or overwrite an entry, evicting the oldest entry (by `createdAt`)
+-   * first when the map is at capacity and the key is new.
++   * Settle an execution that threw. Releases the lock and rejects the join
++   * promise; stale failures are ignored so an old owner cannot delete a newer
++   * record.
+    */
+-  put(key: string, entry: StoreEntry): void {
+-    if (!this.entries.has(key) && this.entries.size >= this.maxEntries) {
++  fail(key: string, owner: number, error: unknown): void {
++    const live = this.take(key, owner)
++    if (live === undefined) return
++    live.reject(error)
++  }
++
++  /**
++   * Drop a cached succeeded result (cache invalidation before a forced
++   * re-execution, e.g. `inFlightOnly`). In-flight locks are never removable
++   * this way — they belong to their owner until `settle`/`fail`.
++   */
++  delete(key: string): void {
++    this.cache.delete(key)
++  }
++
++  /** Total live records (executing locks + cached results; expired cache rows count until lazily cleaned). */
++  get size(): number {
++    return this.executing.size + this.cache.size
++  }
++
++  /** Detach the live executing row if — and only if — `owner` still owns it. */
++  private take(key: string, owner: number): ExecutingEntry | undefined {
++    const live = this.executing.get(key)
++    if (live === undefined || live.owner !== owner) return undefined
++    this.executing.delete(key)
++    return live
++  }
++
++  /** Write a succeeded row into the cache, evicting oldest-first when over `maxEntries`. */
++  private cacheResult(
++    key: string,
++    owner: number,
++    fingerprint: string,
++    result: ToolExecutionResult,
++    ttlMs: number,
++  ): void {
++    const now = this.now()
++    // Expired rows no longer deserve budget: drop them before capacity checks.
++    for (const [candidate, value] of this.cache) {
++      if (now > value.expiresAt) this.cache.delete(candidate)
++    }
++    this.cache.set(key, {
++      state: 'succeeded',
++      owner,
++      fingerprint,
++      createdAt: now,
++      expiresAt: now + ttlMs,
++      result,
++    })
++    if (this.cache.size > this.maxEntries) {
+       let oldestKey: string | undefined
+       let oldestAt = Number.POSITIVE_INFINITY
+-      for (const [candidate, value] of this.entries) {
++      for (const [candidate, value] of this.cache) {
+         if (value.createdAt < oldestAt) {
+           oldestAt = value.createdAt
+           oldestKey = candidate
+         }
+       }
+-      if (oldestKey !== undefined) this.entries.delete(oldestKey)
++      if (oldestKey !== undefined) this.cache.delete(oldestKey)
+     }
+-    this.entries.set(key, entry)
+-  }
+-
+-  /** Remove a key unconditionally. */
+-  delete(key: string): void {
+-    this.entries.delete(key)
+-  }
+-
+-  /** Number of live entries (diagnostics / tests). */
+-  get size(): number {
+-    return this.entries.size
+   }
+ }
+diff --git a/tests/index.spec.ts b/tests/index.spec.ts
+index a6b31f1..4b5d15b 100644
+--- a/tests/index.spec.ts
++++ b/tests/index.spec.ts
+@@ -291,7 +291,142 @@ describe('fail-loud config validation', () => {
+     await expect(failingHarness({ maxEntries: 0 })).rejects.toThrow(/maxEntries/)
+   })
+ 
++  it('rejects a non-positive maxInFlight', async () => {
++    await expect(failingHarness({ maxInFlight: 0 })).rejects.toThrow(/maxInFlight/)
++  })
++
+   it('rejects a rule without a tool pattern', async () => {
+     await expect(failingHarness({ rules: [{ mode: 'reuse' }] } as Config)).rejects.toThrow(/tool/)
+   })
+ })
++
++describe('P0 regression — cache capacity never evicts an in-flight lock (A/B/A, maxEntries=1)', () => {
++  it('a retry of an executing key joins instead of re-executing, even under cache pressure', async () => {
++    let attempts = 0
++    const gate = deferred<ContentBlock[]>()
++    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }], maxEntries: 1 })
++    registerTool(ctx, 'create_order', async () => {
++      attempts += 1
++      if (attempts === 1) return gate.promise // A: held in flight
++      return [{ type: 'text', text: `order-${attempts}` }] // B and later calls run immediately
++    })
++
++    const a1 = executeTool(ctx, 'create_order', { orderId: 'a' }) // A claims the lock (attempt 1)
++    // B is a different key: it claims and completes, filling the cache to cap.
++    // Pre-fix, B's cache write evicted A's executing lock here.
++    const b1 = await executeTool(ctx, 'create_order', { orderId: 'b' })
++    expect(b1).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-2' }] })
++
++    const a2 = executeTool(ctx, 'create_order', { orderId: 'a' }) // must JOIN A, not re-execute
++    gate.resolve([{ type: 'text', text: 'order-1' }])
++    const [ra1, ra2] = await Promise.all([a1, a2])
++    expect(attempts).toBe(2) // A ran once, B ran once — A's retry was deduplicated
++    expect(ra1).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
++    expect(ra2).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
++  })
++})
++
++describe('P0 regression — in-flight capacity is refused, never bypassed', () => {
++  it('returns a structured capacity error and does not run the side effect', async () => {
++    let attempts = 0
++    const gate = deferred<ContentBlock[]>()
++    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }], maxInFlight: 1 })
++    registerTool(ctx, 'create_order', async () => {
++      attempts += 1
++      return gate.promise
++    })
++
++    const first = executeTool(ctx, 'create_order', { orderId: 'a' }) // occupies the only slot
++    const refused = await executeTool(ctx, 'create_order', { orderId: 'b' })
++    expect(refused).toMatchObject({
++      isError: true,
++      error: { info: { code: 'IDEMPOTENCY_CAPACITY_REJECTED', name: 'IdempotencyCapacityRejected' } },
++    })
++    expect(attempts).toBe(1) // the refused call never reached the tool
++
++    gate.resolve([{ type: 'text', text: 'order-1' }])
++    await first
++    const after = await executeTool(ctx, 'create_order', { orderId: 'b' }) // slot free again
++    expect(after).toMatchObject({ isError: false })
++    expect(attempts).toBe(2)
++  })
++
++  it('joins a same-key retry while the in-flight table is full — only new keys are refused', async () => {
++    let attempts = 0
++    const gate = deferred<ContentBlock[]>()
++    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }], maxInFlight: 1 })
++    registerTool(ctx, 'create_order', async () => {
++      attempts += 1
++      return gate.promise
++    })
++
++    const a1 = executeTool(ctx, 'create_order', { orderId: 'a' }) // claims the only slot
++    const a2 = executeTool(ctx, 'create_order', { orderId: 'a' }) // same-key retry → join, never refuse
++    const refused = await executeTool(ctx, 'create_order', { orderId: 'b' }) // new key → capacity error
++    expect(refused).toMatchObject({
++      isError: true,
++      error: { info: { code: 'IDEMPOTENCY_CAPACITY_REJECTED' } },
++    })
++    expect(attempts).toBe(1) // the join and the refusal left the side effect at exactly one run
++
++    gate.resolve([{ type: 'text', text: 'order-1' }])
++    const [ra1, ra2] = await Promise.all([a1, a2])
++    expect(attempts).toBe(1)
++    expect(ra1).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
++    expect(ra2).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
++
++    const after = await executeTool(ctx, 'create_order', { orderId: 'b' }) // slot free → executes
++    expect(after).toMatchObject({ isError: false })
++    expect(attempts).toBe(2)
++  })
++
++  it('a synchronous downstream throw releases the owner — retry re-executes, no zombie lock', async () => {
++    let attempts = 0
++    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
++    registerTool(ctx, 'create_order', async () => {
++      attempts += 1
++      return [{ type: 'text', text: `order-${attempts}` }]
++    })
++    // Registered after the plugin loaded, this wrapper sits downstream of the
++    // idempotency guard and throws synchronously inside the guard's `next()` —
++    // the placeholder must have been claimed and must be released by the catch.
++    const removeThrower = ctx.on('tools/execute', () => {
++      throw new Error('sync-downstream-boom')
++    }) as unknown as () => void
++
++    const first = await executeTool(ctx, 'create_order', { orderId: 'a' })
++    expect(first).toMatchObject({ isError: true }) // the dispatcher converts the throw to a tool error result
++    expect(attempts).toBe(0) // the tool body was never reached
++
++    removeThrower()
++    const second = await executeTool(ctx, 'create_order', { orderId: 'a' })
++    expect(second).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
++    expect(attempts).toBe(1) // the failed claim released the lock; the retry executed exactly once
++  })
++})
++
++describe('P0 regression — own __proto__ argument fields are distinct requests', () => {
++  it('does not merge a request carrying an own __proto__ field into a plain one', async () => {
++    let attempts = 0
++    const ctx = await toolHarness({ rules: [{ tool: 'create_order' }] })
++    registerTool(ctx, 'create_order', async () => {
++      attempts += 1
++      return [{ type: 'text', text: `order-${attempts}` }]
++    })
++
++    // Legal JSON: JSON.parse creates `__proto__` as an own data property.
++    const withProto = JSON.parse('{"__proto__":{"x":1},"a":1}') as Record<string, unknown>
++    const without = JSON.parse('{"a":1}') as Record<string, unknown>
++
++    const r1 = await executeTool(ctx, 'create_order', withProto)
++    const r2 = await executeTool(ctx, 'create_order', without)
++    // Pre-fix the canonicalizer dropped the own field and r2 replayed r1 (attempts stayed 1).
++    expect(attempts).toBe(2)
++    expect(r2).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-2' }] })
++
++    // Identical requests still deduplicate, including the special key.
++    const r3 = await executeTool(ctx, 'create_order', withProto)
++    expect(attempts).toBe(2)
++    expect(r3).toMatchObject({ isError: false, content: [{ type: 'text', text: 'order-1' }] })
++  })
++})
+diff --git a/tsconfig.json b/tsconfig.json
+index 238e0dc..97b6fc8 100644
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -3,6 +3,14 @@
+   "compilerOptions": {
+     "noEmit": true
+   },
++  // e2e.spec.ts 通过相对路径 `.ts` 导入 deepseek-harness 内部
++  // `packages/core/agent-loop/tests/mock-adapter.ts`（TS5097/TS6307：越界文件且需
++  // allowImportingTsExtensions）。该套件绑定本地 harness 布局，属运行时验证面
++  // （审计 P1：E2E 私有源码依赖待阶段 C 移除）；公开 API 类型契约以单元测试为准，
++  // 故从本工程的 tsc 类型检查排除，不拖入整个 deepseek-harness 源码。
++  "exclude": [
++    "tests/e2e.spec.ts"
++  ],
+   "include": [
+     "src",
+     "tests",
+diff --git a/vitest.config.ts b/vitest.config.ts
+index e847bdf..f409dae 100644
+--- a/vitest.config.ts
++++ b/vitest.config.ts
+@@ -4,13 +4,14 @@ export default defineConfig({
+   test: {
+     environment: 'node',
+     include: ['tests/**/*.spec.ts'],
+-    // The E2E suite imports the monorepo's scripted MockAdapter
+-    // (`deepseek-harness/packages/core/agent-loop/tests/mock-adapter.ts`),
+-    // which lives outside this package root.
+-    server: {
+-      fs: {
+-        allow: ['../deepseek-harness'],
+-      },
++  },
++  // Vitest 4 移除了 `test.server.fs`；文件服务白名单走 Vite 顶层 `server.fs.allow`。
++  // The E2E suite imports the monorepo's scripted MockAdapter
++  // (`deepseek-harness/packages/core/agent-loop/tests/mock-adapter.ts`),
++  // which lives outside this package root.
++  server: {
++    fs: {
++      allow: ['../deepseek-harness'],
+     },
+   },
+ })
+diff --git a/src/canonicalize.ts b/src/canonicalize.ts
+new file mode 100644
+index 0000000..932bba1
+--- /dev/null
++++ b/src/canonicalize.ts
+@@ -0,0 +1,56 @@
++/**
++ * Request canonicalization & fingerprinting.
++ *
++ * Splitting the canonicalizer out of the plugin entry keeps the normalization
++ * contract independently testable: two requests canonicalize to the same
++ * fingerprint iff the plugin may legally treat them as the same idempotency
++ * operation (same tool, argument objects equal up to property order).
++ * @module @why-daydream/dsh-tool-idempotency/canonicalize
++ */
++
++import type { ToolExecution } from '@deepseek-ai/dsh-tools'
++
++/**
++ * Deep key-sort of a parsed-JSON value so argument objects differing only in
++ * property order canonicalize identically (same idiom as
++ * `@deepseek-ai/dsh-repeat-tool-reminder`).
++ *
++ * The sorted container is deliberately prototype-less: a plain `{}` target
++ * would turn an own `__proto__` data key (legal in JSON, produced by
++ * `JSON.parse`) into a prototype write, silently dropping a real argument
++ * field and merging distinct requests into one fingerprint. `Object.keys`
++ * sorts over the source's own enumerable keys only, so inherited members are
++ * never serialized.
++ */
++export function sortJsonValue(value: unknown): unknown {
++  if (Array.isArray(value)) return value.map(sortJsonValue)
++  if (value !== null && typeof value === 'object') {
++    const record = value as Record<string, unknown>
++    const sorted: Record<string, unknown> = Object.create(null) as Record<string, unknown>
++    for (const key of Object.keys(record).sort()) {
++      sorted[key] = sortJsonValue(record[key])
++    }
++    return sorted
++  }
++  return value
++}
++
++/** Deterministic FNV-1a 32-bit hash (hex) — dependency-free request fingerprinting. */
++function hashString(input: string): string {
++  let hash = 0x811c9dc5
++  for (let i = 0; i < input.length; i++) {
++    hash ^= input.charCodeAt(i)
++    hash = Math.imul(hash, 0x01000193)
++  }
++  return (hash >>> 0).toString(16).padStart(8, '0')
++}
++
++/**
++ * Request fingerprint: hash of tool name + canonicalized arguments.
++ * 32-bit FNV-1a is a cheap dedup hint, not a collision-proof equality proof
++ * (see audit P1 — SHA-256 + canonical-version byte are the planned upgrade).
++ */
++export function fingerprintOf(exec: ToolExecution): string {
++  const canonical = JSON.stringify(sortJsonValue(exec.arguments))
++  return hashString(`${exec.name}\u0000${canonical}`)
++}
+diff --git a/tests/canonicalize.spec.ts b/tests/canonicalize.spec.ts
+new file mode 100644
+index 0000000..f3d61a9
+--- /dev/null
++++ b/tests/canonicalize.spec.ts
+@@ -0,0 +1,65 @@
++/**
++ * Regression suite for request canonicalization (P0: JSON own-field loss).
++ *
++ * Pre-fix behavior (HEAD b6db190): `sortJsonValue` assembled the sorted object
++ * on a plain `{}`, so an own `__proto__` data key (legal JSON, produced by
++ * `JSON.parse`) became a prototype write and was silently dropped — two
++ * different requests canonicalized to the same fingerprint and the second was
++ * wrongly replayed. These cases fail on the old implementation and must pass
++ * on the fixed one.
++ */
++
++import { describe, expect, it } from 'vitest'
++import type { ToolExecution } from '@deepseek-ai/dsh-tools'
++import { fingerprintOf, sortJsonValue } from '../src/canonicalize.js'
++
++function fp(name: string, args: unknown): string {
++  return fingerprintOf({ name, arguments: args } as unknown as ToolExecution)
++}
++
++/** Build an object with `__proto__` as a real own data property, as JSON.parse does. */
++function parsed(text: string): Record<string, unknown> {
++  return JSON.parse(text) as Record<string, unknown>
++}
++
++describe('canonicalize — own-field preservation (P0)', () => {
++  it('keeps an own __proto__ field instead of writing the object prototype', () => {
++    const sorted = sortJsonValue(parsed('{"__proto__":{"x":1},"a":1}')) as Record<string, unknown>
++    expect(Object.getPrototypeOf(sorted)).toBeNull()
++    expect(Object.prototype.hasOwnProperty.call(sorted, '__proto__')).toBe(true)
++    expect(Object.keys(sorted)).toEqual(['__proto__', 'a'])
++    expect((sorted['__proto__'] as { x: number }).x).toBe(1)
++    expect(JSON.stringify(sorted)).toBe('{"__proto__":{"x":1},"a":1}')
++  })
++
++  it('does not pollute Object.prototype while canonicalizing', () => {
++    sortJsonValue(parsed('{"__proto__":{"polluted":true}}'))
++    expect((Object.prototype as { polluted?: unknown }).polluted).toBeUndefined()
++  })
++
++  it('distinguishes a request with an own __proto__ field from one without — no merge', () => {
++    expect(fp('t', parsed('{"__proto__":{"x":1},"a":1}'))).not.toBe(fp('t', parsed('{"a":1}')))
++  })
++
++  it('distinguishes own constructor / prototype JSON fields from their absence', () => {
++    expect(fp('t', parsed('{"constructor":{"x":1}}'))).not.toBe(fp('t', parsed('{}')))
++    expect(fp('t', parsed('{"prototype":{"x":1}}'))).not.toBe(fp('t', parsed('{}')))
++  })
++
++  it('treats requests equal up to property order as the same request — special keys included', () => {
++    expect(fp('t', parsed('{"__proto__":{"x":1},"a":1}'))).toBe(fp('t', parsed('{"a":1,"__proto__":{"x":1}}')))
++    expect(fp('t', { a: 1, b: 2 })).toBe(fp('t', { b: 2, a: 1 }))
++  })
++
++  it('keeps nested objects order-insensitive and arrays order-sensitive', () => {
++    expect(fp('t', { n: { a: 1, b: 2 }, c: 3 })).toBe(fp('t', { c: 3, n: { b: 2, a: 1 } }))
++    expect(fp('t', { xs: [1, 2] })).not.toBe(fp('t', { xs: [2, 1] }))
++  })
++
++  it('keeps the tool name and Unicode payload in the fingerprint', () => {
++    expect(fp('a', { x: 1 })).not.toBe(fp('b', { x: 1 }))
++    const zh = { 订单: '甲', 备注: '中文' }
++    expect(fp('t', zh)).toBe(fp('t', { 备注: '中文', 订单: '甲' }))
++    expect(fp('t', zh)).not.toBe(fp('t', { 订单: '甲', 备注: '英文' }))
++  })
++})
+diff --git a/tests/store-regression.spec.ts b/tests/store-regression.spec.ts
+new file mode 100644
+index 0000000..f0785ba
+--- /dev/null
++++ b/tests/store-regression.spec.ts
+@@ -0,0 +1,211 @@
++/**
++ * Regression suite for the P0 store hardening (2026-09-07 audit).
++ *
++ * Pre-fix behavior (HEAD b6db190): `MemoryStore.put` evicted the *oldest
++ * entry* — including an in-flight `executing` lock — when `maxEntries` was
++ * reached, so a second key could silently drop the lock of a running
++ * execution; the evicted execution later re-ran its side effect, and its
++ * completion overwrote (or its failure deleted) the newer record.
++ *
++ * Fixed contract covered here:
++ * - cache capacity pressure never evicts an in-flight lock;
++ * - `maxInFlight` saturation refuses new claims instead of bypassing the guard;
++ * - settlements are owner-scoped: stale owners cannot delete or overwrite;
++ * - TTL governs the succeeded cache only, never an in-flight lock;
++ * - `delete` invalidates the cache but never touches a live lock.
++ */
++
++import { describe, expect, it } from 'vitest'
++import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
++import { MemoryStore } from '../src/stores/memory.js'
++
++function okResult(n: number): ToolExecutionResult {
++  return { isError: false, content: [{ type: 'text', text: `ok-${n}` }] } as unknown as ToolExecutionResult
++}
++
++function errResult(): ToolExecutionResult {
++  return { isError: true, content: [{ type: 'text', text: 'boom' }] } as unknown as ToolExecutionResult
++}
++
++describe('MemoryStore P0 — in-flight locks survive cache capacity', () => {
++  it('A/B/A interleave: cache pressure never evicts the executing lock, retries join', async () => {
++    const store = new MemoryStore(1) // maxEntries = 1: the audit repro capacity
++    const a = store.reserve('A', 'fp-a')
++    expect(a).not.toBeNull()
++    expect(store.get('A')?.state).toBe('executing')
++
++    // B is a different key: it claims and completes, filling the cache to cap.
++    const b = store.reserve('B', 'fp-b')
++    expect(b).not.toBeNull()
++    store.settle('B', b!.owner, okResult(1), 1000)
++    expect(store.get('B')?.state).toBe('succeeded')
++    // P0: A's lock must still be live after B's cache write.
++    expect(store.get('A')?.state).toBe('executing')
++
++    // A retry of A must join, never claim twice (forking the side effect).
++    expect(() => store.reserve('A', 'fp-a')).toThrow(/duplicate in-flight/)
++
++    // Completing A caches it; the oldest cache row (B) is evicted instead.
++    const aResult = okResult(2)
++    store.settle('A', a!.owner, aResult, 1000)
++    await expect(a!.promise).resolves.toBe(aResult)
++    expect(store.get('A')?.state).toBe('succeeded')
++    expect(store.get('A')?.result).toBe(aResult)
++    expect(store.get('B')).toBeUndefined()
++  })
++
++  it('does not evict a live lock even when every cache slot is hot', async () => {
++    const store = new MemoryStore(2)
++    const hold = store.reserve('LOCKED', 'fp-x')
++    expect(hold).not.toBeNull()
++    const c1 = store.reserve('c1', 'fp-1')!
++    store.settle('c1', c1.owner, okResult(1), 1000)
++    const c2 = store.reserve('c2', 'fp-2')!
++    store.settle('c2', c2.owner, okResult(2), 1000)
++    const c3 = store.reserve('c3', 'fp-3')!
++    store.settle('c3', c3.owner, okResult(3), 1000) // cache over cap → evicts c1
++    expect(store.get('c1')).toBeUndefined()
++    expect(store.get('c2')?.state).toBe('succeeded')
++    expect(store.get('c3')?.state).toBe('succeeded')
++    expect(store.get('LOCKED')?.state).toBe('executing')
++  })
++})
++
++describe('MemoryStore P0 — in-flight capacity is refused, never bypassed', () => {
++  it('saturating maxInFlight refuses the claim without disturbing live locks', () => {
++    const store = new MemoryStore(5, 2)
++    const x = store.reserve('X', 'fp-x')
++    const y = store.reserve('Y', 'fp-y')
++    expect(x).not.toBeNull()
++    expect(y).not.toBeNull()
++    expect(store.reserve('Z', 'fp-z')).toBeNull() // refused — no lock eviction, no unprotected run
++    expect(store.get('X')?.state).toBe('executing')
++    expect(store.get('Y')?.state).toBe('executing')
++    expect(store.size).toBe(2)
++
++    // Freeing a slot lets Z claim.
++    store.settle('X', x!.owner, okResult(1), 1000)
++    const z = store.reserve('Z', 'fp-z')
++    expect(z).not.toBeNull()
++    store.settle('Y', y!.owner, okResult(2), 1000)
++    store.settle('Z', z!.owner, okResult(3), 1000)
++    expect(store.size).toBe(3)
++  })
++
++  it('a same-key retry is never refused by capacity — it stays joinable while the table is full', async () => {
++    const store = new MemoryStore(2, 1)
++    const k = store.reserve('K', 'fp-k')
++    expect(k).not.toBeNull()
++    expect(store.reserve('other', 'fp-o')).toBeNull() // new key refused at maxInFlight=1
++    expect(store.get('K')?.state).toBe('executing') // K untouched and joinable
++
++    const done = okResult(7)
++    store.settle('K', k!.owner, done, 1000)
++    await expect(k!.promise).resolves.toBe(done) // the join contract settles with the owner's result
++  })
++
++  it('a failed placeholder frees the in-flight slot immediately — no zombie claim', () => {
++    const store = new MemoryStore(5, 1)
++    const r = store.reserve('K', 'fp-k')
++    expect(r).not.toBeNull()
++    r!.promise.catch(() => undefined)
++    store.fail('K', r!.owner, new Error('downstream-boom')) // synchronous downstream failure path
++
++    // The same key is immediately retryable (no zombie claim).
++    const again = store.reserve('K', 'fp-k')
++    expect(again).not.toBeNull()
++    // Settle it, then a different key can claim the freed slot as well.
++    store.settle('K', again!.owner, okResult(1), 1000)
++    expect(store.reserve('other', 'fp-o')).not.toBeNull()
++    expect(store.size).toBe(2) // K cached (1) + other executing (1)
++  })
++})
++
++describe('MemoryStore P0 — owner-scoped settlements', () => {
++  it('a stale owner can neither delete a newer lock nor overwrite it with a cached row', async () => {
++    const store = new MemoryStore(5, 5)
++    const first = store.reserve('K', 'fp-k')
++    expect(first).not.toBeNull()
++    first!.promise.catch(() => undefined) // the first owner is failed below
++    store.fail('K', first!.owner, new Error('boom-1'))
++    expect(store.get('K')).toBeUndefined() // retry may claim again
++
++    const second = store.reserve('K', 'fp-k')
++    expect(second).not.toBeNull()
++
++    // Stale failure from the first owner must not delete the new lock.
++    store.fail('K', first!.owner, new Error('stale'))
++    expect(store.get('K')?.owner).toBe(second!.owner)
++    expect(store.get('K')?.state).toBe('executing')
++
++    // Stale success must not overwrite the new lock or write a cache row.
++    store.settle('K', first!.owner, okResult(99), 1000)
++    expect(store.get('K')?.owner).toBe(second!.owner)
++    expect(store.get('K')?.state).toBe('executing')
++
++    // The real owner completes normally.
++    const done = okResult(2)
++    store.settle('K', second!.owner, done, 1000)
++    await expect(second!.promise).resolves.toBe(done)
++    expect(store.get('K')?.state).toBe('succeeded')
++    expect(store.get('K')?.result).toBe(done)
++
++    // Even after a succeeded cache row exists, a late stale success changes nothing.
++    store.settle('K', first!.owner, okResult(99), 1000)
++    expect(store.get('K')?.result).toBe(done)
++  })
++
++  it('error results release the lock for retry without caching', () => {
++    const store = new MemoryStore(5, 5)
++    const r = store.reserve('K', 'fp-k')
++    expect(r).not.toBeNull()
++    store.settle('K', r!.owner, errResult(), 1000)
++    expect(store.get('K')).toBeUndefined() // retry must re-execute
++
++    const again = store.reserve('K', 'fp-k')
++    expect(again).not.toBeNull()
++    expect(store.size).toBe(1)
++    store.settle('K', again!.owner, okResult(1), 1000)
++    expect(store.get('K')?.state).toBe('succeeded')
++  })
++})
++
++describe('MemoryStore P0 — TTL and delete boundaries', () => {
++  it('TTL governs the succeeded cache only, never an in-flight lock', () => {
++    let now = 1000
++    const store = new MemoryStore(10, 10, () => now)
++    const r = store.reserve('K', 'fp-k')
++    expect(r).not.toBeNull()
++    now = 2 ** 40 // arbitrarily far future
++    expect(store.get('K')?.state).toBe('executing') // an in-flight task is not re-entered by TTL
++
++    store.settle('K', r!.owner, okResult(1), 100) // cache expires at now + 100
++    expect(store.get('K')?.state).toBe('succeeded')
++    now += 101
++    expect(store.get('K')).toBeUndefined() // TTL expired → miss → retry allowed
++  })
++
++  it('delete() invalidates the cache but never a live lock', () => {
++    const store = new MemoryStore(5, 5)
++    const r = store.reserve('K', 'fp-k')
++    expect(r).not.toBeNull()
++    store.delete('K')
++    expect(store.get('K')?.state).toBe('executing') // lock untouched
++
++    store.settle('K', r!.owner, okResult(1), 1000)
++    expect(store.get('K')?.state).toBe('succeeded')
++    store.delete('K') // inFlightOnly-style cache invalidation
++    expect(store.get('K')).toBeUndefined()
++    expect(store.size).toBe(0)
++  })
++})
++
++describe('MemoryStore constructor validation', () => {
++  it('rejects a non-positive maxEntries', () => {
++    expect(() => new MemoryStore(0)).toThrow(/maxEntries/)
++  })
++
++  it('rejects a non-positive maxInFlight', () => {
++    expect(() => new MemoryStore(1, 0)).toThrow(/maxInFlight/)
++  })
++})
+diff --git a/docs/UPGRADE.md b/docs/UPGRADE.md
+new file mode 100644
+index 0000000..e63e09f
+--- /dev/null
++++ b/docs/UPGRADE.md
+@@ -0,0 +1,59 @@
++# 升级说明（Upgrade Notes）
++
++适用范围：`@why-daydream/dsh-tool-idempotency` 自 npm `0.1.1`（及未发布的 0.1.2 源码线）
++升级到「P0 加固」候选（2026-09-07 审计后的源码改动）。
++
++> 发布状态：**未发布、未验证**（npm `latest=0.1.1`；`lib/` 未重建；vitest/tsc/build 被
++> 环境拦截标 BLOCKED）。本文描述的是**候选版本的行为差异**，不代表已发布事实。
++
++## 1. 配置行为变化
++
++| 项 | 0.1.1 / 未发布 0.1.2 线（旧） | P0 加固候选（新） |
++| --- | --- | --- |
++| `maxInFlight` | 不存在（无独立在途上限） | 新增，默认 `256`；同时**在途**守卫执行数达到上限时，新的**不同 key** 调用被拒绝，返回 `IDEMPOTENCY_CAPACITY_REJECTED` |
++| `maxEntries` 淘汰范围 | 总条目上限；满时按 `createdAt` 淘汰**最旧条目（含执行中锁）** ← P0 缺陷 | 只约束**成功结果缓存**；只淘汰已完成项；**执行中锁永不淘汰** |
++| 容量满时的处理 | 静默淘汰（可能丢掉执行锁 → 重复副作用） | 新 key 在在途满时**显式拒绝**，绝不绕过守卫执行副作用；同 key 重试不受影响（仍 join） |
++| JSON 参数规范化 | 键排序容器为普通 `{}`；自有 `__proto__` 字段被丢 → 两类不同请求被错误合并 | 无原型容器；`__proto__`/`constructor`/`prototype` 等自有 JSON 字段保留，请求按真实参数区分 |
++| 错误码 | 仅 `IDEMPOTENCY_KEY_MISMATCH` | 新增 `IDEMPOTENCY_CAPACITY_REJECTED`（`error.info.name = IdempotencyCapacityRejected`，错误结果形态与 mismatch 一致：`isError` + `content` + `error`） |
++
++### 高并发影响（务必评估）
++
++- 默认 `maxInFlight = 256` 意味着：单进程内**同时**在途的受守卫工具调用超过 256 个
++  （不同 key）时，多出的调用立即收到结构化容量错误，而不是排队或执行。
++- 典型 agent 单会话并发远低于此值；**批量并行工具调用**（一次扇出数百个受守卫调用）
++  或**多会话共享一个 Cordis 进程**时可能触达。触达后的表现是确定性的：
++  调用方收到 `isError: true` 的容量错误并可自行重试；业务侧若要消除该错误，
++  调大 `maxInFlight` 或对超限分支做业务重试策略。
++
++## 2. 升级步骤（上线前）
++
++1. 重建并自测：`npm run typecheck:tests && npm run typecheck && npm run build`，
++   再跑 `npm run test:unit`、`npm run test:p0`、`npm run test:e2e`（命令含义见
++   `compat/README.md`；当前环境受限时先标 BLOCKED，不得跳过）。
++2. 打包验收：`npm pack --dry-run` 确认 `lib/canonicalize.js` 已在 files 白名单
++   （见 `package.json`），并在隔离目录用 tgz 严格安装后逐一加载公开入口。
++3. **内存 store 升级/重启会丢失历史去重记录**：切换前先停止接收新的受保护写操作，
++   等待在途任务完成；存在「已提交但状态未知」的调用先对账再切换。
++4. 灰度：不共享存储的内存插件**无法跨实例去重**；多实例灰度需稳定路由 + 下游业务幂等
++   或串行切换，不能用简单流量分流宣称灰度安全。
++
++## 3. 回退
++
++- 保存旧精确版本（npm 下载 + integrity）、`compat/targets.lock.json` 与配置快照
++  （`compat/snapshots/`）后即可回退二进制；**回退不能恢复业务副作用**。
++- 行为升级（scope/key 语义、`unknown` 重试策略、缓存容量语义）尚未合入本候选；
++  若未来引入，需单独迁移说明与版本计划（0.2.0 线），不随本候选静默改变。
++
++## 4. 明确不在本版解决的问题（不要过度宣称）
++
++- **unknown 场景**：「副作用已提交但响应丢失/报错」仍然会释放锁并允许重试，可能造成
++  重复副作用。本候选**未改变**该策略；安全重试需要下游幂等 key、fencing 或事务证据。
++  `isError` 与抛错 = 「可重试」≠「一定安全重试」。
++- 跨进程/持久化、多实例去重、租约与崩溃恢复：不在本版，见审计方案的未来里程碑。
++- 32 位 FNV 指纹碰撞风险（P1）、显式/隐式 key 的作用域隔离（P1）：未在本候选处理。
++
++## 5. 发布版本计划
++
++- 仓库 `package.json` 仍为 `0.1.2`（未发布）。若「兼容 patch + P0 修复」一起作为下一
++  候选发出，需确认 `0.1.2` 尚未被任何 tag/发布流程固定；不能让已验证标签指向另一份
++  内容。最终版本号与发布门禁（同 tgz 构建→测试→发布→下载复验）按审计方案阶段 D 执行。

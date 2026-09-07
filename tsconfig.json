@@ -3,6 +3,9 @@
   "compilerOptions": {
     "noEmit": true
   },
+  // C 阶段整改（2026-09-07）：e2e.spec.ts 已改用本仓库自建
+  // tests/mock-adapter.ts（仅依赖 @deepseek-ai/dsh-llm 公开导出），不再相对导入
+  // deepseek-harness 内部源码，重新纳入类型检查（覆盖全部 tests）。
   "include": [
     "src",
     "tests",

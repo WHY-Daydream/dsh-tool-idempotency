@@ -1,0 +1,14 @@
+
+> @why-daydream/dsh-tool-idempotency@0.1.2 test:e2e
+> vitest run tests/e2e.spec.ts
+
+
+ RUN  v4.1.10 /mnt/workspace/DSH/dsh-tool-idempotency
+
+ ✓ tests/e2e.spec.ts (2 tests) 83ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  11:24:46
+   Duration  1.20s (transform 616ms, setup 0ms, import 755ms, tests 83ms, environment 0ms)
+
