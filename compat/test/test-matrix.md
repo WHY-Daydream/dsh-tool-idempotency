@@ -523,17 +523,36 @@ Lua / WATCH-MULTI），不能沿用 GET→判断→DEL——作为分布式实�
 | --- | --- |
 | 声明（peer 摊平） | transaction 0.1.0：cordis `>=4.0.1`、dsh-invariants `>=0.0.1-rc.1`（宽范围）；idempotency 0.2.0：cordis `>=4.0.1` + dsh-invariants/dsh-tools UNION（含 0.1.x 线）；宿主 current-latest（cordis 4.0.2 / dsh-tools+dsh-invariants 0.1.2-rc.1）——**peer ranges 与宿主有交集，非「范围不交集」** |
 | 代码（API） | transaction 在本地宿主（cordis 4.x + invariants 0.1.x）下 **build PASS + unit 14/14 PASS**——**无 API 冲突**，非 adapter 场景 |
-| 结论 | 非扩 peer range、非 adapter；ERESOLVE 若存在需**真实安装的精确报错**定位（本地复现 BLOCKED-网络），不得用 --legacy-peer-deps/--force/手工 patch 绕过 |
+| 结论 | **#3 状态：BLOCKED — exact peer-resolution path not yet captured**（2026-09-07 修正，见下） |
+
+**#3 transaction × idempotency clean-install ERESOLVE 状态块**
+
+已排除：
+- ✅ transaction 与目标 host 的直接 peer ranges 有交集（非「范围不交集」）
+- ✅ transaction 在目标 host **build PASS + unit 14/14 PASS**（无 API 冲突，非 adapter 场景）
+- ✅ **`@deepseek-ai/schemastery@3.18.1` 确实存在于公开 npm registry**（registry 已有 3.18.2）
+  ——此前「registry 无法解析」的假设已被反证，**从嫌疑列表移除**
+
+尚未确定：
+- ⛔ ERESOLVE 具体来自哪条 **transitive peer edge**——仅比较两个插件顶层 peerDependencies
+  不足以证明整棵 Arborist dependency tree 可解；ERESOLVE 是依赖树/peer resolution 错误
+  （非 registry 网络错误）；`--legacy-peer-deps` 绕过契约，不得用于 GATE-TI-1
 
 ### 14.2 GATE-TI 状态
 
 | Gate | 内容 | 状态 |
 | --- | --- | --- |
 | TI-1 | 两插件在目标 host clean install，无 peer 绕过 | **BLOCKED-网络**（fixture package.json 就绪） |
-| TI-2 | 真实调用链（host → transaction → idempotency → tool → side effect）执行 | **BLOCKED-网络**（combo-acceptance.mjs 场景 1 就绪） |
-| TI-3 | commit / rollback / unknown 三条关键路径 | **BLOCKED-网络**（脚本场景 1-3 就绪） |
-| TI-4 | stale executionId 不得作用于新 transaction execution | **BLOCKED-网络**（脚本场景 4 就绪；store/pipeline 层等价回归 Case 1-4 已 12/12） |
-| TI-5 | 组合测试进入 run-all/acceptance | **已纳入**（fixture 未安装 → run-all 报 BLOCKED 且整体失败，不留人工验证记录） |
+| TI-2 | 真实调用链（host → transaction → idempotency → tool → side effect）执行 | 🟡 link-mode 验证通过（combo-link-run 场景 1）；⏳ packaged clean-install 执行 pending |
+| TI-3 | commit / rollback / unknown 三条关键路径 | 🟡 link-mode 验证通过（场景 1-3）；⏳ packaged 执行 pending |
+| TI-4 | stale executionId 不得作用于新 transaction execution | ✅ link-mode 回归通过（场景 4，组合 18/18 ALL PASS）；⏳ packaged 执行 pending |
+| TI-5 | 组合测试进入 run-all/acceptance | ✅ 已接入 run-all；⏳ clean-install 执行 pending（未安装 → BLOCKED 且整体失败） |
+| ERESOLVE root cause | 精确 dependency edge | ⛔ UNKNOWN — 待 `npm ci --loglevel verbose` 捕获 |
+
+最终 verdict（负责人 2026-09-07）：**0.2.0 HOLD（已收窄）**——不是 correctness bug、
+不是 fencing bug、不是 transaction runtime bug；唯一未决是 **尚未证明真实 npm dependency
+graph 可 clean install**。link-mode 18/18 = runtime composition evidence ✅，但不替代
+clean-install compatibility evidence ❌（release discipline 不变）。
 
 ### 14.3 资产与兼容矩阵
 
@@ -549,7 +568,13 @@ Lua / WATCH-MULTI），不能沿用 GET→判断→DEL——作为分布式实�
 | prev-release（0.1.1-rc.2 线） | 0.1.0 | 0.2.0 | BLOCKED-网络 | BLOCKED-网络 |
 
 执行命令（网络恢复后）：
-- `cd compat/fixtures/transaction-combo-0.2.0 && npm ci`（无 peer 绕过）→ `node combo-acceptance.mjs`
+- **第一步：抓 ERESOLVE 精确报错**（若存在；不要改代码、不要 --force/--legacy-peer-deps）：
+  `cd compat/fixtures/transaction-combo-0.2.0 && npm ci --loglevel verbose 2>&1 | tee npm-ci.log`
+  关注段：`While resolving:` / `Found:` / `Could not resolve dependency:` /
+  `Conflicting peer dependency:`——这几行直接定位 #3 的 transitive peer edge。
+  同时记录环境：`node -v; npm -v; npm config get registry`；
+  sanity：`npm view @deepseek-ai/schemastery@3.18.1 version`（预期 `3.18.1`）。
+- 无 ERESOLVE 时：`node combo-acceptance.mjs`（GATE-TI-2/3/4 packaged 执行）
 - 全套件：`node compat/test/run-all.mjs`（combo 阶段随 fixture 就绪自动执行）
 - prev-release 组合 fixture 待执行时按同法建立（transaction peer 范围对 0.1.1-rc.2 线理论兼容）。
 
