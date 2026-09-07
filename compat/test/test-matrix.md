@@ -576,7 +576,9 @@ clean-install compatibility evidence ❌（release discipline 不变）。
   sanity：`npm view @deepseek-ai/schemastery@3.18.1 version`（预期 `3.18.1`）。
 - 无 ERESOLVE 时：`node combo-acceptance.mjs`（GATE-TI-2/3/4 packaged 执行）
 - 全套件：`node compat/test/run-all.mjs`（combo 阶段随 fixture 就绪自动执行）
-- prev-release 组合 fixture 待执行时按同法建立（transaction peer 范围对 0.1.1-rc.2 线理论兼容）。
+- **prev-release 组合 fixture 已建立**：`compat/fixtures/transaction-combo-prev-release-0.2.0/`
+  （宿主 0.1.1-rc.2 闭包 + 双插件，脚本与 current-latest 版同构）——执行命令同上；
+  run-all 的 combo 阶段按 current-latest fixture 判定，prev-release 线单独执行。
 
 
 
