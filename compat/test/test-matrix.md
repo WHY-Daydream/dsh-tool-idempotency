@@ -511,6 +511,124 @@ Lua / WATCH-MULTI），不能沿用 GET→判断→DEL——作为分布式实�
 **保留不动**（已在兼容面，改名收益低）；如需可未来新增 `IDEMPOTENCY_EXECUTION_MISMATCH`
 或随大版本调整。
 
+## 14. transaction × idempotency 组合验收（GATE-TI 1-5，0.2.0 最后一关）
+
+> 负责人决定：**不从 0.2.0 scope 剥离**，继续解决组合兼容（手动 `invalidate` 不替代
+> 真实组合验收）。当前状态：**资产就绪、执行 BLOCKED-网络**（本地 registry 不可达；
+> 用户侧网络已通可执行）。
+
+### 14.1 调查结论（三层排查第一、二层：声明 vs API）
+
+| 层 | 结论 |
+| --- | --- |
+| 声明（peer 摊平） | transaction 0.1.0：cordis `>=4.0.1`、dsh-invariants `>=0.0.1-rc.1`（宽范围）；idempotency 0.2.0：cordis `>=4.0.1` + dsh-invariants/dsh-tools UNION（含 0.1.x 线）；宿主 current-latest（cordis 4.0.2 / dsh-tools+dsh-invariants 0.1.2-rc.1）——**peer ranges 与宿主有交集，非「范围不交集」** |
+| 代码（API） | transaction 在本地宿主（cordis 4.x + invariants 0.1.x）下 **build PASS + unit 14/14 PASS**——**无 API 冲突**，非 adapter 场景 |
+| 结论 | **#3 状态：BLOCKED — exact peer-resolution path not yet captured**（2026-09-07 修正，见下） |
+
+**#3 transaction × idempotency clean-install ERESOLVE — root cause 已定位并修复（2026-09-07）**
+
+根因：**transaction 的 peer 声明 `>=0.0.1-rc.1` 写窄**——node-semver 预发布规则下，
+预发布版本只匹配「范围中含同 [major,minor,patch] 三元组的预发布比较器」的范围；
+`>=0.0.1-rc.1` 的三元组为 [0,0,1]，因此 **0.1.x-rc.y 全部宿主线（0.1.0-rc.5 /
+0.1.1-rc.2 / 0.1.2-rc.1）均不匹配** → transaction peer 冲突（ERESOLVE 真实存在）。
+
+修复（transaction 0.1.0，独立仓库 dsh-tool-transaction）：peer 扩为与 idempotency
+对齐的 UNION（`>=0.0.1-rc.1 <0.1.0-0 || >=0.1.0-0 <0.2.0-0 || >=0.1.1-0 <0.2.0-0 ||
+>=0.1.2-0 <0.2.0-0 || >=0.1.3-0 <0.2.0-0`）——semver 验证对 0.0.1-rc.1 / 0.1.0-rc.5 /
+0.1.1-rc.2 / 0.1.2-rc.1 / 0.1.2 / 0.1.3 **全部 SATISFIED**；transaction build PASS +
+unit 14/14 回归；tgz 重打（8915 B）。
+
+剩余：本环境离线 ERESOLVE 复现（`npm install --offline`）仍报
+`Found: @deepseek-ai/dsh-invariants@undefined`（idempotency UNION peer）——为
+**离线缓存元数据缺失的 artifact**（缓存缺 0.1.2-rc.1 元数据 → 版本无法解析 → 假冲突；
+semver 已确定性证明 0.1.2-rc.1 SATISFIES UNION；修复后 transaction 的 peer 已从
+冲突图消失）。**真实在线 npm ci 确认归 #4 / GATE-TI-1**（用户侧网络已通可执行；
+预期 PASS——所有 peer edges 语义满足）。
+
+### 14.2 GATE-TI 状态
+
+| Gate | 内容 | 状态 |
+| --- | --- | --- |
+| TI-1 | 两插件在目标 host clean install，无 peer 绕过 | ✅ **CLEARED（2026-09-08 网络恢复后真实联网实测）**：current-latest 线 `npm install` exit 0、27 包；prev-release 线 exit 0、19 包；两 npm-install.log 均**无 ERESOLVE / `Conflicting peer` / 绕过标记**（node v22.22.0 / npm 10.9.4 / registry https://registry.npmjs.org/） |
+| TI-2 | 真实调用链（host → transaction → idempotency → tool → side effect）执行 | ✅ packaged clean-install 执行通过（2026-09-08 两线 combo 场景 1 PASS；link-mode 同场景亦通过） |
+| TI-3 | commit / rollback / unknown 三条关键路径 | ✅ packaged 执行通过（两线 combo 场景 1-3 PASS） |
+| TI-4 | stale executionId 不得作用于新 transaction execution | ✅ packaged 执行通过（两线 combo 场景 4 stale fencing 全 PASS） |
+| TI-5 | 组合测试进入 run-all/acceptance | ✅ run-all 全套件 ALL PASS（2026-09-08 exit 0，combo 阶段随 fixture 就绪自动执行） |
+| ERESOLVE root cause | 精确 dependency edge | ✅ **已定位并修复**（transaction peer `>=0.0.1-rc.1` 写窄 → 扩为 UNION；semver 全 SATISFIED + build/unit 回归 + tgz 重打）；2026-09-08 真实在线 npm install **无 ERESOLVE**，root cause 闭环确认 |
+
+最终 verdict（负责人 2026-09-07，双方复验后冻结）原为 **0.2.0 HOLD**——不是 correctness
+bug、不是 fencing bug、不是 transaction runtime bug；唯一未闭环是 **联网环境下的真实
+clean-install / packaged-composition 证据**（link-mode 18/18 = runtime composition
+evidence ✅，不升级为 acceptance PASS）。
+
+**2026-09-08 更新（网络阻塞解除，真实联网执行闭环）**：两条组合线（current-latest +
+prev-release）严格 `npm install` 全 PASS（无 peer 绕过、无 ERESOLVE）、两线
+`combo-acceptance.mjs` 4 场景全 PASS（commit/rollback/unknown/stale fencing）、全套件
+`node compat/test/run-all.mjs` **ALL PASS exit 0**（typecheck + p0 26/26 + unit 77/77 +
+correctness 89/89 + e2e 2/2 + combo 阶段自动执行）。
+→ **GATE-TI-1/2/3/4/5 CLEARED → 0.2.0: HOLD → RELEASE CANDIDATE**。
+评审范围不扩大；发布条件冻结维持（**不再改 idempotency、transaction、peer range 或
+fixture**）。若后续出现真 ERESOLVE（`While resolving:` / `Found:` / `Could not resolve
+dependency:` / `Conflicting peer dependency:`）→ 只针对该 dependency edge 做最小修复。
+
+**2026-09-08 发布记录（验收 → RELEASE → 复验闭环，详见 `compat/acceptance/release-candidate-0.2.0-2026-09-08.md`）**：
+- 发布通道：tag `v0.2.0`（`16f0325`）→ GH Actions npm-publish（run 34176379444），发布
+  **已验收归档**（门禁 sha256sum -c / 内部 name/version / tag==版本 全 PASS）。
+- attempt 1 发布步骤 `npm error E404`（npm 接收发布请求时拒绝，tgz 读取正常）→ 负责人核验
+  token 权限并更新 `NPM_TOKEN` secret → Re-run failed jobs。
+- attempt 2 发布步骤 **success**；「发布后复验」步骤 `npm view @0.2.0` 立即查询撞 npm 读传播
+  延迟（E404 假阴性）——发布本身成功，已由独立复验补齐。
+- 独立复验（全部实测 PASS）：registry `dist.integrity` == 归档 sha512；`latest=0.2.0`；
+  干净目录下载包 sha256 == `d923c8eb…`（`tgz-0.2.0.sha256`）；baseline OK + regression
+  **14/14** + agent-e2e 去重冒烟 `executions=1` EXIT 0。
+- **0.2.0: RELEASE CANDIDATE → RELEASED**（npm `@why-daydream/dsh-tool-idempotency@0.2.0`，
+  dist-tags latest=0.2.0）。
+
+### 14.3 资产与兼容矩阵
+
+- fixture：`compat/fixtures/transaction-combo-0.2.0/`——宿主精确版本 + transaction 0.1.0
+  （`compat/acceptance/why-daydream-dsh-tool-transaction-0.1.0.tgz`，修复后重打，
+  sha256 `4930ce5c…`）+ idempotency 0.2.0 候选（file: tgz）；`combo-acceptance.mjs`
+  覆盖 4 场景（commit/rollback/unknown/stale fencing），内置 `[VERSION]` 校验。
+  两组合 fixture 均引用**仓库内相对路径**（用户 clone 后即可安装）。
+- run-all：`combo:transaction×idempotency` 阶段（GATE-TI-5，随 fixture 就绪自动执行）。
+- 兼容矩阵（2026-09-08 真实联网实测通过）：
+
+| Host/Core | transaction | idempotency | clean install | runtime composition |
+| --- | --- | --- | --- | --- |
+| current-latest（cordis 4.0.2 / dsh-tools+dsh-invariants 0.1.2-rc.1） | 0.1.0 | 0.2.0 | ✅ PASS（2026-09-08，27 包，无 ERESOLVE） | ✅ PASS（combo 4 场景） |
+| prev-release（0.1.1-rc.2 线） | 0.1.0 | 0.2.0 | ✅ PASS（2026-09-08，19 包，无 ERESOLVE） | ✅ PASS（combo 4 场景） |
+
+执行命令（2026-09-08 已实测执行，日志归档见下；复验可重放）：
+- **首次（fixture 无锁文件）用 `npm install`**（会生成 package-lock.json；锁文件已入库，
+  之后可用 `npm ci` 复验）：
+  `cd compat/fixtures/transaction-combo-0.2.0 && npm install --loglevel verbose 2>&1 | tee npm-install.log`
+  关注段：`While resolving:` / `Found:` / `Could not resolve dependency:` /
+  `Conflicting peer dependency:`——若出现即贴回定位残余 edge。
+  同时记录环境：`node -v; npm -v; npm config get registry`。
+- 安装成功后：`node combo-acceptance.mjs`（GATE-TI-2/3/4 packaged 执行）
+- 全套件：`node compat/test/run-all.mjs`（combo 阶段随 fixture 就绪自动执行）
+- **prev-release 组合 fixture 已建立**：`compat/fixtures/transaction-combo-prev-release-0.2.0/`
+  （宿主 0.1.1-rc.2 闭包 + 双插件，脚本与 current-latest 版同构）——执行命令同上；
+  run-all 的 combo 阶段按 current-latest fixture 判定，prev-release 线单独执行。
+
+### 14.4 真实联网执行证据（2026-09-08 归档）
+
+环境：node v22.22.0 / npm 10.9.4 / registry https://registry.npmjs.org/，工作树 HEAD
+`9a3f97f`（未改源码、peer range 或 fixture）。两线均首次安装（无锁文件 → `npm install`
+生成），日志无 ERESOLVE / `Conflicting peer` / 绕过标记；combo 4 场景
+（commit/rollback/unknown/stale executionId 拒绝）全 PASS；`compat/test/run-all.mjs`
+exit 0（typecheck + p0 26/26 + unit 77/77 + correctness 89/89 + e2e 2/2 + combo 阶段）。
+
+归档日志（`compat/test/logs/`，git add -f 入库）：
+- `combo-current-latest-install-2026-09-08.log`（npm install 全量 verbose）
+- `combo-current-latest-run-2026-09-08.log`（combo-acceptance 4 场景）
+- `combo-prev-release-install-2026-09-08.log`
+- `combo-prev-release-run-2026-09-08.log`
+- `run-all-gate-ti-2026-09-08.log`（全套件）
+
+fixture 目录内另留同内容工作副本（`npm-install.log` / `combo-run.log`，gitignore）。
+
 
 
 

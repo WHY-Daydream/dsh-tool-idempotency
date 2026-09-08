@@ -1,0 +1,111 @@
+npm verbose cli /root/.nvm/versions/node/v22.22.0/bin/node /root/.nvm/versions/node/v22.22.0/bin/npm
+npm info using npm@10.9.4
+npm info using node@v22.22.0
+npm verbose title npm install
+npm verbose argv "install" "--loglevel" "verbose"
+npm verbose logfile logs-max:10 dir:/root/.npm/_logs/2026-09-08T01_04_06_409Z-
+npm verbose logfile /root/.npm/_logs/2026-09-08T01_04_06_409Z-debug-0.log
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fcordis 766ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fcordis-plugin-include 212ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fcordis-plugin-loader 220ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/node-addon-require-builtin 205ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-invariants 199ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-tools 212ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-agent 229ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-llm 219ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-scope 235ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-session 237ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-session-projection 212ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-system-prompt 243ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-typert-protocol 199ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-code-runtime 268ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-user-approval 221ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-brand 300ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-agent-loop 205ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-session-persistence 235ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-timeout 280ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-settings 206ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fschemastery 223ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-agent-loop-testkit 380ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-tool-call-timeout-policy 225ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@standard-schema%2fspec 218ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fcosmokit 657ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-util-values 670ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@standard-schema%2fspec 674ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-util-values 677ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-util-values 683ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-util-values 689ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fcosmokit 689ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-util-crypto 690ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-util-values 692ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh-util-values 717ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/zod 1333ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/zod 1368ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/zod 1388ms (cache miss)
+npm http cache https://registry.npmjs.org/@deepseek-ai%2fcordis 11ms (cache hit)
+npm http cache zod@https://registry.npmjs.org/zod/-/zod-4.5.4.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/cosmokit@https://registry.npmjs.org/@deepseek-ai/cosmokit/-/cosmokit-1.8.3.tgz 0ms (cache hit)
+npm http cache @standard-schema/spec@https://registry.npmjs.org/@standard-schema/spec/-/spec-1.1.0.tgz 0ms (cache hit)
+npm http cache @why-daydream/dsh-tool-transaction@file:/mnt/workspace/DSH/dsh-tool-idempotency/compat/acceptance/why-daydream-dsh-tool-transaction-0.1.0.tgz 0ms (cache hit)
+npm http cache @why-daydream/dsh-tool-idempotency@file:/mnt/workspace/DSH/dsh-tool-idempotency/compat/acceptance/why-daydream-dsh-tool-idempotency-0.2.0.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-util-crypto@https://registry.npmjs.org/@deepseek-ai/dsh-util-crypto/-/dsh-util-crypto-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-agent-loop-testkit@https://registry.npmjs.org/@deepseek-ai/dsh-agent-loop-testkit/-/dsh-agent-loop-testkit-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-tool-call-timeout-policy@https://registry.npmjs.org/@deepseek-ai/dsh-tool-call-timeout-policy/-/dsh-tool-call-timeout-policy-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-timeout@https://registry.npmjs.org/@deepseek-ai/dsh-timeout/-/dsh-timeout-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-session-persistence@https://registry.npmjs.org/@deepseek-ai/dsh-session-persistence/-/dsh-session-persistence-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-brand@https://registry.npmjs.org/@deepseek-ai/dsh-brand/-/dsh-brand-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/schemastery@https://registry.npmjs.org/@deepseek-ai/schemastery/-/schemastery-3.18.2.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-code-runtime@https://registry.npmjs.org/@deepseek-ai/dsh-code-runtime/-/dsh-code-runtime-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-settings@https://registry.npmjs.org/@deepseek-ai/dsh-settings/-/dsh-settings-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-user-approval@https://registry.npmjs.org/@deepseek-ai/dsh-user-approval/-/dsh-user-approval-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-tools@https://registry.npmjs.org/@deepseek-ai/dsh-tools/-/dsh-tools-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-typert-protocol@https://registry.npmjs.org/@deepseek-ai/dsh-typert-protocol/-/dsh-typert-protocol-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-system-prompt@https://registry.npmjs.org/@deepseek-ai/dsh-system-prompt/-/dsh-system-prompt-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-session-projection@https://registry.npmjs.org/@deepseek-ai/dsh-session-projection/-/dsh-session-projection-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-invariants@https://registry.npmjs.org/@deepseek-ai/dsh-invariants/-/dsh-invariants-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-scope@https://registry.npmjs.org/@deepseek-ai/dsh-scope/-/dsh-scope-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-llm@https://registry.npmjs.org/@deepseek-ai/dsh-llm/-/dsh-llm-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-agent@https://registry.npmjs.org/@deepseek-ai/dsh-agent/-/dsh-agent-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/cordis@https://registry.npmjs.org/@deepseek-ai/cordis/-/cordis-4.0.2.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-session@https://registry.npmjs.org/@deepseek-ai/dsh-session/-/dsh-session-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-util-values@https://registry.npmjs.org/@deepseek-ai/dsh-util-values/-/dsh-util-values-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http cache @deepseek-ai/dsh-agent-loop@https://registry.npmjs.org/@deepseek-ai/dsh-agent-loop/-/dsh-agent-loop-0.1.2-rc.1.tgz 0ms (cache hit)
+npm http fetch POST 200 https://registry.npmjs.org/-/npm/v1/security/advisories/bulk 413ms
+npm http fetch GET 200 https://registry.npmjs.org/@standard-schema/spec/-/spec-1.1.0.tgz 1045ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-code-runtime/-/dsh-code-runtime-0.1.2-rc.1.tgz 1166ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-util-crypto/-/dsh-util-crypto-0.1.2-rc.1.tgz 1222ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-brand/-/dsh-brand-0.1.2-rc.1.tgz 1376ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-invariants/-/dsh-invariants-0.1.2-rc.1.tgz 1374ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-agent-loop-testkit/-/dsh-agent-loop-testkit-0.1.2-rc.1.tgz 1402ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-tool-call-timeout-policy/-/dsh-tool-call-timeout-policy-0.1.2-rc.1.tgz 1403ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-util-values/-/dsh-util-values-0.1.2-rc.1.tgz 1389ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-timeout/-/dsh-timeout-0.1.2-rc.1.tgz 1424ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-user-approval/-/dsh-user-approval-0.1.2-rc.1.tgz 1502ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-settings/-/dsh-settings-0.1.2-rc.1.tgz 1657ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-agent-loop/-/dsh-agent-loop-0.1.2-rc.1.tgz 1944ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-scope/-/dsh-scope-0.1.2-rc.1.tgz 2008ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-session-projection/-/dsh-session-projection-0.1.2-rc.1.tgz 2038ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-system-prompt/-/dsh-system-prompt-0.1.2-rc.1.tgz 2047ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/schemastery/-/schemastery-3.18.2.tgz 2075ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-typert-protocol/-/dsh-typert-protocol-0.1.2-rc.1.tgz 2086ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/cosmokit/-/cosmokit-1.8.3.tgz 2090ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-session-persistence/-/dsh-session-persistence-0.1.2-rc.1.tgz 2148ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-llm/-/dsh-llm-0.1.2-rc.1.tgz 2520ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-agent/-/dsh-agent-0.1.2-rc.1.tgz 2536ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-session/-/dsh-session-0.1.2-rc.1.tgz 2606ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/cordis/-/cordis-4.0.2.tgz 2627ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh-tools/-/dsh-tools-0.1.2-rc.1.tgz 2758ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/zod/-/zod-4.5.4.tgz 8892ms (cache miss)
+
+added 27 packages, and audited 28 packages in 17s
+
+1 package is looking for funding
+  run `npm fund` for details
+
+found 0 vulnerabilities
+npm verbose cwd /mnt/workspace/DSH/dsh-tool-idempotency/compat/fixtures/transaction-combo-0.2.0
+npm verbose os Linux 5.10.134-17.3.al8.x86_64
+npm verbose node v22.22.0
+npm verbose npm  v10.9.4
+npm verbose exit 0
+npm info ok

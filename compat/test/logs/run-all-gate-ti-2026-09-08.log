@@ -1,0 +1,8 @@
+[run-all] 起点 2026-09-08T01:05:02.141Z node=v22.22.0 cwd=/mnt/workspace/DSH/dsh-tool-idempotency
+[run-all] PASS typecheck:tests
+[run-all] PASS test:p0 —  Test Files  2 passed (2) |       Tests  26 passed (26)
+[run-all] PASS test:unit —  Test Files  4 passed (4) |       Tests  77 passed (77)
+[run-all] PASS test:correctness —  Test Files  13 passed (13) |       Tests  89 passed (89)
+[run-all] PASS test:e2e —  Test Files  1 passed (1) |       Tests  2 passed (2)
+[run-all] PASS combo:transaction×idempotency — [COMBO] 场景 4 stale executionId 不得作用于新 transaction execution | [COMBO] ALL PASS（GATE-TI-2 调用链 / TI-3 commit+rollback+unknown / TI-4 stale fencing）
+[run-all] ALL PASS
