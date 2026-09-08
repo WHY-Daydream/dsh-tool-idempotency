@@ -571,6 +571,19 @@ correctness 89/89 + e2e 2/2 + combo 阶段自动执行）。
 fixture**）。若后续出现真 ERESOLVE（`While resolving:` / `Found:` / `Could not resolve
 dependency:` / `Conflicting peer dependency:`）→ 只针对该 dependency edge 做最小修复。
 
+**2026-09-08 发布记录（验收 → RELEASE → 复验闭环，详见 `compat/acceptance/release-candidate-0.2.0-2026-09-08.md`）**：
+- 发布通道：tag `v0.2.0`（`16f0325`）→ GH Actions npm-publish（run 34176379444），发布
+  **已验收归档**（门禁 sha256sum -c / 内部 name/version / tag==版本 全 PASS）。
+- attempt 1 发布步骤 `npm error E404`（npm 接收发布请求时拒绝，tgz 读取正常）→ 负责人核验
+  token 权限并更新 `NPM_TOKEN` secret → Re-run failed jobs。
+- attempt 2 发布步骤 **success**；「发布后复验」步骤 `npm view @0.2.0` 立即查询撞 npm 读传播
+  延迟（E404 假阴性）——发布本身成功，已由独立复验补齐。
+- 独立复验（全部实测 PASS）：registry `dist.integrity` == 归档 sha512；`latest=0.2.0`；
+  干净目录下载包 sha256 == `d923c8eb…`（`tgz-0.2.0.sha256`）；baseline OK + regression
+  **14/14** + agent-e2e 去重冒烟 `executions=1` EXIT 0。
+- **0.2.0: RELEASE CANDIDATE → RELEASED**（npm `@why-daydream/dsh-tool-idempotency@0.2.0`，
+  dist-tags latest=0.2.0）。
+
 ### 14.3 资产与兼容矩阵
 
 - fixture：`compat/fixtures/transaction-combo-0.2.0/`——宿主精确版本 + transaction 0.1.0
