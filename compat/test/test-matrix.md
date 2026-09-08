@@ -549,28 +549,27 @@ semver 已确定性证明 0.1.2-rc.1 SATISFIES UNION；修复后 transaction 的
 
 | Gate | 内容 | 状态 |
 | --- | --- | --- |
-| TI-1 | 两插件在目标 host clean install，无 peer 绕过 | **BLOCKED — 执行环境 DNS/网络**（双方复验：git clone `Could not resolve host: github.com`；npm `EAI_AGAIN getaddrinfo registry.npmjs.org`——未走到 Arborist peer solving 阶段，**无新 ERESOLVE**，不得归因残余 peer edge） |
-| TI-2 | 真实调用链（host → transaction → idempotency → tool → side effect）执行 | 🟡 link-mode 验证通过（combo-link-run 场景 1）；⏳ packaged clean-install 执行 pending |
-| TI-3 | commit / rollback / unknown 三条关键路径 | 🟡 link-mode 验证通过（场景 1-3）；⏳ packaged 执行 pending |
-| TI-4 | stale executionId 不得作用于新 transaction execution | ✅ link-mode 回归通过（场景 4，组合 18/18 ALL PASS）；⏳ packaged 执行 pending |
-| TI-5 | 组合测试进入 run-all/acceptance | ✅ 已接入 run-all；⏳ clean-install 执行 pending（未安装 → BLOCKED 且整体失败） |
-| ERESOLVE root cause | 精确 dependency edge | ✅ **已定位并修复**（transaction peer `>=0.0.1-rc.1` 写窄 → 扩为 UNION；semver 全 SATISFIED + build/unit 回归 + tgz 重打）；在线 npm ci 确认归 TI-1 |
+| TI-1 | 两插件在目标 host clean install，无 peer 绕过 | ✅ **CLEARED（2026-09-08 网络恢复后真实联网实测）**：current-latest 线 `npm install` exit 0、27 包；prev-release 线 exit 0、19 包；两 npm-install.log 均**无 ERESOLVE / `Conflicting peer` / 绕过标记**（node v22.22.0 / npm 10.9.4 / registry https://registry.npmjs.org/） |
+| TI-2 | 真实调用链（host → transaction → idempotency → tool → side effect）执行 | ✅ packaged clean-install 执行通过（2026-09-08 两线 combo 场景 1 PASS；link-mode 同场景亦通过） |
+| TI-3 | commit / rollback / unknown 三条关键路径 | ✅ packaged 执行通过（两线 combo 场景 1-3 PASS） |
+| TI-4 | stale executionId 不得作用于新 transaction execution | ✅ packaged 执行通过（两线 combo 场景 4 stale fencing 全 PASS） |
+| TI-5 | 组合测试进入 run-all/acceptance | ✅ run-all 全套件 ALL PASS（2026-09-08 exit 0，combo 阶段随 fixture 就绪自动执行） |
+| ERESOLVE root cause | 精确 dependency edge | ✅ **已定位并修复**（transaction peer `>=0.0.1-rc.1` 写窄 → 扩为 UNION；semver 全 SATISFIED + build/unit 回归 + tgz 重打）；2026-09-08 真实在线 npm install **无 ERESOLVE**，root cause 闭环确认 |
 
-最终 verdict（负责人 2026-09-07，双方复验后冻结）：**0.2.0 HOLD**——不是 correctness bug、
-不是 fencing bug、不是 transaction runtime bug；唯一未闭环是 **联网环境下的真实
-clean-install / packaged-composition 证据**。link-mode 18/18 = runtime composition
-evidence ✅，**不升级为 acceptance PASS**（缺真实 package → npm dependency graph →
-clean install → package boundary → combo acceptance → full run-all 链）。
+最终 verdict（负责人 2026-09-07，双方复验后冻结）原为 **0.2.0 HOLD**——不是 correctness
+bug、不是 fencing bug、不是 transaction runtime bug；唯一未闭环是 **联网环境下的真实
+clean-install / packaged-composition 证据**（link-mode 18/18 = runtime composition
+evidence ✅，不升级为 acceptance PASS）。
 
-**发布条件已冻结，不再扩大 review**（2026-09-07）：在新证据出现前**不再改
-idempotency、transaction、peer range 或 fixture**。仅剩执行链（current-latest +
-prev-release 两条线各跑一遍）：
-- `cd compat/fixtures/transaction-combo-0.2.0 && npm install --loglevel verbose 2>&1 | tee npm-install.log`
-- `node combo-acceptance.mjs`
-- `node compat/test/run-all.mjs`（prev-release fixture 同法）
-- 两条线全 PASS → GATE-TI-1/2/3/4/5 CLEARED → **0.2.0: HOLD → RELEASE CANDIDATE**
-- 若出现真 ERESOLVE（`While resolving:` / `Found:` / `Could not resolve dependency:` /
-  `Conflicting peer dependency:`）→ 只针对该 dependency edge 做最小修复。
+**2026-09-08 更新（网络阻塞解除，真实联网执行闭环）**：两条组合线（current-latest +
+prev-release）严格 `npm install` 全 PASS（无 peer 绕过、无 ERESOLVE）、两线
+`combo-acceptance.mjs` 4 场景全 PASS（commit/rollback/unknown/stale fencing）、全套件
+`node compat/test/run-all.mjs` **ALL PASS exit 0**（typecheck + p0 26/26 + unit 77/77 +
+correctness 89/89 + e2e 2/2 + combo 阶段自动执行）。
+→ **GATE-TI-1/2/3/4/5 CLEARED → 0.2.0: HOLD → RELEASE CANDIDATE**。
+评审范围不扩大；发布条件冻结维持（**不再改 idempotency、transaction、peer range 或
+fixture**）。若后续出现真 ERESOLVE（`While resolving:` / `Found:` / `Could not resolve
+dependency:` / `Conflicting peer dependency:`）→ 只针对该 dependency edge 做最小修复。
 
 ### 14.3 资产与兼容矩阵
 
@@ -580,16 +579,16 @@ prev-release 两条线各跑一遍）：
   覆盖 4 场景（commit/rollback/unknown/stale fencing），内置 `[VERSION]` 校验。
   两组合 fixture 均引用**仓库内相对路径**（用户 clone 后即可安装）。
 - run-all：`combo:transaction×idempotency` 阶段（GATE-TI-5，随 fixture 就绪自动执行）。
-- 兼容矩阵（待网络恢复 / 用户侧执行）：
+- 兼容矩阵（2026-09-08 真实联网实测通过）：
 
 | Host/Core | transaction | idempotency | clean install | runtime composition |
 | --- | --- | --- | --- | --- |
-| current-latest（cordis 4.0.2 / dsh-tools+dsh-invariants 0.1.2-rc.1） | 0.1.0 | 0.2.0 | BLOCKED-网络 | BLOCKED-网络 |
-| prev-release（0.1.1-rc.2 线） | 0.1.0 | 0.2.0 | BLOCKED-网络 | BLOCKED-网络 |
+| current-latest（cordis 4.0.2 / dsh-tools+dsh-invariants 0.1.2-rc.1） | 0.1.0 | 0.2.0 | ✅ PASS（2026-09-08，27 包，无 ERESOLVE） | ✅ PASS（combo 4 场景） |
+| prev-release（0.1.1-rc.2 线） | 0.1.0 | 0.2.0 | ✅ PASS（2026-09-08，19 包，无 ERESOLVE） | ✅ PASS（combo 4 场景） |
 
-执行命令（网络恢复后）：
-- **首次（fixture 无锁文件）用 `npm install`**（会生成 package-lock.json；锁文件就绪后
-  可用 `npm ci` 复验）：
+执行命令（2026-09-08 已实测执行，日志归档见下；复验可重放）：
+- **首次（fixture 无锁文件）用 `npm install`**（会生成 package-lock.json；锁文件已入库，
+  之后可用 `npm ci` 复验）：
   `cd compat/fixtures/transaction-combo-0.2.0 && npm install --loglevel verbose 2>&1 | tee npm-install.log`
   关注段：`While resolving:` / `Found:` / `Could not resolve dependency:` /
   `Conflicting peer dependency:`——若出现即贴回定位残余 edge。
@@ -599,6 +598,23 @@ prev-release 两条线各跑一遍）：
 - **prev-release 组合 fixture 已建立**：`compat/fixtures/transaction-combo-prev-release-0.2.0/`
   （宿主 0.1.1-rc.2 闭包 + 双插件，脚本与 current-latest 版同构）——执行命令同上；
   run-all 的 combo 阶段按 current-latest fixture 判定，prev-release 线单独执行。
+
+### 14.4 真实联网执行证据（2026-09-08 归档）
+
+环境：node v22.22.0 / npm 10.9.4 / registry https://registry.npmjs.org/，工作树 HEAD
+`9a3f97f`（未改源码、peer range 或 fixture）。两线均首次安装（无锁文件 → `npm install`
+生成），日志无 ERESOLVE / `Conflicting peer` / 绕过标记；combo 4 场景
+（commit/rollback/unknown/stale executionId 拒绝）全 PASS；`compat/test/run-all.mjs`
+exit 0（typecheck + p0 26/26 + unit 77/77 + correctness 89/89 + e2e 2/2 + combo 阶段）。
+
+归档日志（`compat/test/logs/`，git add -f 入库）：
+- `combo-current-latest-install-2026-09-08.log`（npm install 全量 verbose）
+- `combo-current-latest-run-2026-09-08.log`（combo-acceptance 4 场景）
+- `combo-prev-release-install-2026-09-08.log`
+- `combo-prev-release-run-2026-09-08.log`
+- `run-all-gate-ti-2026-09-08.log`（全套件）
+
+fixture 目录内另留同内容工作副本（`npm-install.log` / `combo-run.log`，gitignore）。
 
 
 

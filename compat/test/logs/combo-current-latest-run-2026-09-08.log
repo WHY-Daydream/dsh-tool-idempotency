@@ -1,0 +1,31 @@
+[VERSION] idempotency loaded = 0.2.0; transaction loaded = 0.1.0
+[COMBO] 场景 1 commit 路径
+  PASS commit 后 transaction 状态 (COMMITTED)
+  PASS 副作用恰执行 1 次
+  PASS idempotency k1 = succeeded
+  PASS 重试重放成功
+  PASS 重试未重复副作用 (ledger=["effect:1"])
+  PASS 重放结果来自缓存
+[COMBO] 场景 2 rollback 路径
+  PASS step2 失败
+  PASS rollback 后状态 (ROLLED_BACK)
+  PASS 补偿 reverse-order 执行 (["k2-compensated"])
+  PASS idempotency k2 保持 succeeded（补偿不破坏守卫记录）
+[COMBO] 场景 3 unknown 路径
+  PASS step 失败
+  PASS idempotency k3 = unknown（响应丢失不得猜成功） (unknown)
+  PASS 自动重试被 STATE_UNKNOWN 阻止 ({"message":"idempotency key `explicit:k3` is in UNKNOWN state — cannot determine whether the side effect committed; do NOT blindly re-execute; reconcile downstream, then release/confirm via ctx.toolIdempotency, or retry with a new operation identity","info":{"name":"IdempotencyStateUnknown","code":"IDEMPOTENCY_STATE_UNKNOWN"}})
+  PASS 副作用未重复 (calls=1)
+  PASS 对账 release 成功
+  PASS release 后记录解除
+[COMBO] 场景 4 stale executionId 不得作用于新 transaction execution
+  PASS txA 执行中（executionId-A 存在）
+  PASS A 失败后 idempotency k4 = unknown
+  PASS 正确 token release(A) 成功 ({"ok":true})
+  PASS txB 执行中（executionId-B 存在且 ≠ A）
+  PASS stale release(A) 拒绝 ({"ok":false,"error":"idempotency key fingerprint mismatch or stale executionId (IDEMPOTENCY_GENERATION_MISMATCH) — refusing to release a record owned by different arguments or an older execution (ABA); re-query to obtain the current executionId"})
+  PASS stale confirm(A) 拒绝
+  PASS stale invalidate(A) 拒绝
+  PASS B 仍 executing 且属于 gB ({"state":"executing","fingerprint":"v1:ee90a8a3a68f9a78c53fbdae0faefe7ee29179b42c4a46f8ca1b9357e7428663","executionId":"cf0892b7-fc38-4553-9e47-9d6079124a65"})
+  PASS B 失败后 idempotency k4 = unknown（gB）
+[COMBO] ALL PASS（GATE-TI-2 调用链 / TI-3 commit+rollback+unknown / TI-4 stale fencing）
